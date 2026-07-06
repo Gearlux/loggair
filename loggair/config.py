@@ -13,6 +13,17 @@ def get_xdg_config_dir() -> Path:
     return base / "loggair"
 
 
+def config_file_candidates() -> List[Path]:
+    """The config-file locations, highest priority first (shared with the
+    ``python -m loggair`` diagnostic, which reports which of them exist)."""
+    return [
+        Path("loggair.yaml"),
+        Path("loggair.yml"),
+        Path("pyproject.toml"),
+        get_xdg_config_dir() / "config.yaml",
+    ]
+
+
 def load_config() -> Dict[str, Any]:
     """
     Load and merge Loggair configuration from standard locations.
@@ -28,10 +39,7 @@ def load_config() -> Dict[str, Any]:
             return cast(Dict[str, Any], tomllib.load(f).get("tool", {}).get("loggair", {}))
 
     candidates: List[Tuple[Path, Callable[[Path], Dict[str, Any]]]] = [
-        (Path("loggair.yaml"), _yaml),
-        (Path("loggair.yml"), _yaml),
-        (Path("pyproject.toml"), _toml),
-        (get_xdg_config_dir() / "config.yaml", _yaml),
+        (path, _toml if path.name == "pyproject.toml" else _yaml) for path in config_file_candidates()
     ]
 
     final_cfg: Dict[str, Any] = {}
