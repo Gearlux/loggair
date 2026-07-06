@@ -41,6 +41,7 @@ Loggair solves these by being **distributed-aware** and **framework-agnostic**.
 - **Interception Modes:** Embed Loggair next to a framework that owns logging (uvicorn, gunicorn) with `intercept: coexist`, protect specific loggers with `intercept_exclude`, or switch interception `off` (see [Interception Modes](#17-interception-modes)).
 - **Webhook & Alerting Sinks:** Route `ERROR`/`CRITICAL` records to Slack, Teams, email, or any of ~100 platforms via [Apprise](https://github.com/caronc/apprise) URLs — batched, throttled, and off the logging hot path (see [Webhook & Alerting Sinks](#15-webhook--alerting-sinks)).
 - **Experiment Context Injection:** Stamp `epoch`/`step`/`run_id` once with `set_context()` and every record in the process carries it — in the default line layout and as structured JSON fields (see [Experiment Context](#14-experiment-context-injection)).
+- **CLI Diagnostic:** `python -m loggair` prints the version, detected rank (and which env var decided it), which config files were found, and the fully resolved settings — strictly read-only (see [Diagnostics](#18-diagnostics-python--m-loggair)).
 - **Config Introspection:** `get_active_config()` returns the fully-resolved, JSON-serializable settings currently in effect (see [Config Introspection](#13-config-introspection)).
 - **Dynamic Level Adjustment:** Change verbosity in a *running* job — `reconfigure(console_level="DEBUG")` programmatically, or via POSIX signals: a reload signal re-reads the config files, a debug signal toggles DEBUG on/off (see [Dynamic Level Adjustment](#12-dynamic-level-adjustment-at-runtime)).
 - **Custom Log Formats:** Override the per-sink loguru format strings (`console_format` / `file_format`) to add thread/process IDs or custom telemetry fields (see [Custom Log Formats](#11-custom-log-formats)).
@@ -622,6 +623,53 @@ capture_warnings: true            # warnings.showwarning redirect (default on)
   (independently of the mode).
 
 An invalid `intercept` value raises `ValueError` at configure time.
+
+### 18. Diagnostics: `python -m loggair`
+
+Verify an installation and inspect the configuration a process *would* get —
+without configuring anything:
+
+```console
+$ python -m loggair
+loggair 0.1.0  (loguru 0.7.3, python 3.12.13)
+process:  MainProcess (pid 64497)
+rank:     3  (from RANK)
+
+config files (highest priority first):
+  [    found] loggair.yaml
+  [not found] loggair.yml
+  [not found] pyproject.toml
+  [    found] /home/me/.config/loggair/config.yaml
+merged file config: {"log_dir": "~/logs", "retention": 3}
+
+resolved settings (args omitted — env > files > defaults):
+  log_dir: "/home/me/logs"
+  ...
+```
+
+- **Strictly read-only**: no log directory is created, no rotation happens, no
+  sinks or interception are installed — safe to run next to a live training
+  job. Alert URLs are shown fully masked (`slack://****`).
+- On a cluster, run it *inside* the launcher to debug rank detection:
+  `torchrun --nproc-per-node 4 -m loggair` or `srun python -m loggair` shows
+  each rank's value and the env var that decided it.
+- A broken config (unknown level, bad `intercept` mode, ...) is reported with
+  context and exit code 1 — the doctor works precisely when configure would
+  fail.
+- `--json` emits the same report as one JSON object for scripts.
+- The install also provides a **`loggair` console script** (same tool, no cwd
+  on `sys.path`). And the `-m` form **self-heals the mono-repo pitfall**: from
+  a directory that itself contains a `loggair/` project folder (a workspace
+  root with an editable install), Python would resolve the package to that
+  folder — the doctor detects the shadow, drops the offending path entry for
+  its own process, re-imports the real package, and prints the full report
+  with a WARNING (and a `shadowed_path_ignored` JSON field), because plain
+  `import loggair` scripts run from that directory still hit the shadow.
+  Only if no real installation exists at all does it exit 2 with instructions.
+
+Programmatic equivalents: `loggair.get_active_config()` for the settings a
+*configured* process is running with, and `loggair.core.resolve_settings()`
+for the same dry resolution this tool prints.
 
 ## Log Inspection
 For the best experience viewing Loggair logs (especially interleaving logs from multiple ranks/workers), we recommend using **[lnav](https://lnav.org/)** (The Log File Navigator).
