@@ -1,0 +1,5 @@
+# Ship the example config and changelog in the source distribution.
+# (The package itself + py.typed are picked up automatically from
+#  [tool.setuptools] in pyproject.toml; LICENSE/README are auto-included.)
+include loggair.example.yaml
+include CHANGELOG.md

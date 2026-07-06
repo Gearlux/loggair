@@ -1,0 +1,109 @@
+[build-system]
+# setuptools>=77 is the PEP 639 floor: `license` as a plain SPDX string below
+# requires it (the TOML-table form is deprecated, removal slated 2027-02).
+requires = ["setuptools>=77.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loggair"
+version = "0.1.0"
+description = "Modern, multiprocess-safe logging for High-Performance Computing and ML."
+readme = "README.md"
+authors = [{name = "Gert Behiels"}]
+# PEP 639 SPDX expression; the license CLASSIFIER is deliberately absent
+# (deprecated in favour of this field — re-adding it reintroduces the
+# SetuptoolsDeprecationWarning at build time).
+license = "MIT"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Logging",
+    "Typing :: Typed",
+]
+dependencies = [
+    "loguru>=0.7.0",
+    "pyyaml>=6.0",
+]
+requires-python = ">=3.12"
+
+[project.optional-dependencies]
+# Webhook/alerting sink (alert_urls): apprise delivers to ~100 services
+# (Slack, Teams, email, generic webhooks) via URL configs — see README §15.
+alerts = [
+    "apprise>=1.9.0",
+]
+dev = [
+    "apprise>=1.9.0",
+    "black>=24.0.0,<25.0.0",
+    # Packaging toolchain: `python -m build` + `twine check dist/*` are the
+    # mandatory pre-release validation (see AGENTS.md packaging mandate).
+    "build>=1.0.0",
+    "twine>=5.0.0",
+    "isort>=5.13.0,<6.0.0",
+    "flake8>=6.0.0,<8.0.0",
+    "flake8-junit-report>=2.1.0",
+    "mypy>=1.0.0,<2.0.0",
+    "types-PyYAML>=6.0.0",
+    "pytest>=7.0.0,<9.0.0",
+    "pytest-cov>=4.0.0,<7.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Gearlux/loggair"
+Repository = "https://github.com/Gearlux/loggair.git"
+Issues = "https://github.com/Gearlux/loggair/issues"
+Changelog = "https://github.com/Gearlux/loggair/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["loggair*"]
+
+[tool.setuptools.package-data]
+loggair = ["py.typed"]
+
+[tool.black]
+line-length = 120
+target-version = ['py312']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 120
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+
+[tool.mypy]
+disable_error_code = ["import-untyped"]
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_optional = true
+
+[[tool.mypy.overrides]]
+module = "loguru.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+filterwarnings = [
+    "ignore:Loggair:",
+]

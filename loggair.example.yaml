@@ -1,0 +1,226 @@
+# Loggair: Example Configuration File
+# This file illustrates all available configuration options for Loggair.
+# You can use this as a template for your project's loggair.yaml or ~/.config/loggair/config.yaml.
+
+# --- General Settings ---
+
+# Directory where log files will be stored.
+# Default: "./logs"
+# Env: LOGGAIR_DIR
+log_dir: "./logs"
+
+# Base name for the log file (e.g., training.log).
+# If omitted, Loggair will auto-detect the name of the running script.
+# Env: LOGGAIR_SCRIPT_NAME
+script_name: "my_app"
+
+# Use a background process-safe queue for the file sink.
+# Strongly recommended for multiprocess (ML) environments. The queue is
+# allocated LAZILY — only when something actually forks/spawns a child
+# process — so leaving this on for single-process scripts is free
+# (no POSIX semaphore allocated, no resource_tracker spawned).
+# Set LOGGAIR_EAGER_ENQUEUE=true to opt out of the laziness and allocate
+# at handler-creation time (rarely needed).
+# Default: false
+# Env: LOGGAIR_ENQUEUE
+enqueue: true
+
+# --- Rotation & Retention ---
+
+# Archive the existing log file on script startup by renaming it with a timestamp.
+# This ensures every training run gets a fresh log file.
+# Falsy values are honored: `rotation_on_startup: false` disables rotation.
+# Default: true
+# Env: LOGGAIR_ROTATION_ON_STARTUP
+rotation_on_startup: true
+
+# The number of TIMESTAMPED ARCHIVES ({name}.{timestamp}.log, compressed or
+# plain) to keep PER SCRIPT NAME before deleting the oldest ones. The startup
+# sweep also prunes archives left by earlier runs under other script names,
+# but never touches a bare {name}.log of another script — in a shared log dir
+# it may be the live sink of a concurrently running process.
+# `retention: 0` is honored (keep no archives).
+# Default: 5
+# Env: LOGGAIR_RETENTION
+retention: 5
+
+# Rotate the ACTIVE log file at runtime, by size or time — for long-running
+# processes (multi-week training, FastAPI/MCP services) whose file would
+# otherwise grow unbounded between restarts. Passed to loguru's rotation=
+# verbatim: "100 MB", "500 KB", "daily", "1 week", "00:00", "monday at 12:00".
+# Invalid values raise at configure time. Main process only (single rotator);
+# when set, retention and compression are ALSO enforced at rotation time by
+# the sink. Default: unset (startup-only rotation).
+# Env: LOGGAIR_ROTATION
+# rotation: "100 MB"
+
+# Compress each rotated log archive. One of "gz", "zip", or unset (no
+# compression). For STARTUP rotation Loggair applies this itself after the
+# rename; when runtime `rotation` is active, the same value is passed to
+# loguru's sink-level compression so runtime archives are compressed too.
+# Retention purges recognise the compressed archives (e.g. {name}.{ts}.log.gz).
+# Default: unset (plain, uncompressed archives)
+# Env: LOGGAIR_COMPRESSION
+# compression: "gz"
+
+# --- Structured / JSON Logging ---
+
+# Emit one JSON object per line on BOTH sinks (loguru's native serialize=True):
+# {"text": "<formatted line>", "record": {message, level, time, name, function,
+# line, process, thread, extra (incl. Loggair's rank_tag), ...}} — the format
+# log aggregators (Elasticsearch/Kibana, Grafana Loki, Datadog) ingest
+# directly. Rank filtering, module_levels, rotation, and enqueue compose
+# unchanged. Forces console coloring OFF (ANSI would otherwise end up inside
+# the JSON "text" field).
+# Default: false
+# Env: LOGGAIR_SERIALIZE
+# serialize: true
+
+# --- Log Levels ---
+
+# Minimum level for logs written to the persistent file.
+# Options: TRACE, DEBUG, INFO, SUCCESS, WARNING, ERROR, CRITICAL
+# Default: "DEBUG"
+# Env: LOGGAIR_FILE_LEVEL
+file_level: "DEBUG"
+
+# Minimum level for logs displayed in the console.
+# Options: TRACE, DEBUG, INFO, SUCCESS, WARNING, ERROR, CRITICAL
+# Default: "INFO"
+# Env: LOGGAIR_CONSOLE_LEVEL
+console_level: "INFO"
+
+# --- Per-Worker Log Files ---
+
+# Give every non-main writer its OWN log file instead of appending to the
+# shared {name}.log: DDP rank 2 -> {name}.rank2.log, child Worker-1 ->
+# {name}.worker-1.log (a rank's own children combine both). Each process then
+# exclusively owns its file, so per-worker files get startup AND runtime
+# rotation too, and no rotation can split another process's stream. Merge at
+# read time with `lnav ./logs`.
+# Default: false (shared file, rank-tagged)
+# Env: LOGGAIR_WORKER_FILES
+# worker_files: true
+
+# --- Interception Modes ---
+
+# How aggressively Loggair takes over stdlib logging:
+#   full    (default) Loggair owns the root; existing named loggers are
+#           stripped so everything propagates into Loggair.
+#   coexist Loggair only APPENDS its handler to the root — a framework that
+#           configured its own logging (uvicorn, gunicorn) keeps its handlers
+#           and both receive records (root level lowered to DEBUG).
+#   off     No interception at all (no root rewiring, no warnings redirect,
+#           no third-party level defaults).
+# Invalid values raise at startup.
+# Env: LOGGAIR_INTERCEPT
+# intercept: "full"
+
+# Dotted logger-name prefixes Loggair must leave completely alone (handlers,
+# propagate, level) even in full mode; children included ("uvicorn" protects
+# "uvicorn.error"). Also skips the built-in third-party silences for them.
+# Env: LOGGAIR_INTERCEPT_EXCLUDE (comma-separated)
+# intercept_exclude:
+#   - "uvicorn"
+#   - "gunicorn"
+
+# Redirect Python warnings (warnings.warn) into Loggair.
+# Default: true
+# Env: LOGGAIR_CAPTURE_WARNINGS
+# capture_warnings: true
+
+# --- Webhook & Alerting Sinks (requires: pip install loggair[alerts]) ---
+
+# Route records at/above alert_level to external platforms via Apprise URLs
+# (Slack, Teams, Discord, Telegram, email, generic webhooks — ~100 services;
+# see https://github.com/caronc/apprise/wiki for URL schemas). Delivery is
+# batched + throttled in a background worker (never blocks logging); invalid
+# URLs fail fast at startup; URLs shown by get_active_config() are redacted.
+# Env: LOGGAIR_ALERT_URLS (comma-separated) / LOGGAIR_ALERT_LEVEL /
+#      LOGGAIR_ALERT_THROTTLE
+# alert_urls:
+#   - "slack://TokenA/TokenB/TokenC/#alerts"
+#   - "mailto://user:pass@gmail.com"
+# alert_level: "ERROR"     # default ERROR
+# alert_throttle: 60       # seconds between deliveries; 0 = every batch
+
+# --- Dynamic Level Adjustment (runtime signals, POSIX only) ---
+
+# Opt-in signals for changing verbosity in a RUNNING process (no restart).
+# reload_signal: re-resolve env vars + config files and reload the sinks —
+#   edit this file, then `kill -USR1 <pid>` to apply it live.
+# debug_signal: toggle both sinks to DEBUG and back — `kill -USR2 <pid>` to
+#   diagnose a live anomaly, again to restore the configured levels.
+# Handlers are installed in the main process/thread only; invalid names fail
+# fast at startup. Programmatic alternative: loggair.reconfigure(...).
+# Default: unset (no signal handlers installed)
+# Env: LOGGAIR_RELOAD_SIGNAL / LOGGAIR_DEBUG_SIGNAL
+# reload_signal: "SIGUSR1"
+# debug_signal: "SIGUSR2"
+
+# --- Custom Sink Formats ---
+
+# Override the loguru format string per sink. Any loguru record field works:
+# {process.id}, {thread.id}, {extra[...]}, plus color markup on the console
+# sink. {extra[rank_tag]} is always stamped and available. Invalid color
+# markup fails fast at startup; a nonexistent FIELD surfaces as a loud
+# per-record loguru error on stderr (record dropped) — test custom formats
+# once. Defaults: loggair.DEFAULT_CONSOLE_FORMAT / DEFAULT_FILE_FORMAT.
+# Env: LOGGAIR_CONSOLE_FORMAT / LOGGAIR_FILE_FORMAT
+# console_format: "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
+# file_format: "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | pid={process.id} | {name}:{function}:{line} | {message}"
+
+# --- Console Coloring ---
+#
+# The console sink colorizes its output with ANSI codes, auto-detected from the
+# terminal by default: colors on an interactive TTY, plain text when stderr is
+# redirected or piped (2> run.log, | tee, plain Jenkins console).
+#
+# There is NO YAML knob for this — the only override is the standard NO_COLOR
+# environment variable (https://no-color.org): set it to any non-empty value to
+# force plain text. Programmatic callers can pass configure_logging(colorize=...).
+
+# --- Per-logger, per-sink Level Overrides ---
+#
+# Override the global file_level / console_level for specific loggers, keyed
+# by the calling module's dotted name (matched against loguru's record["name"]).
+#
+# Matching rules:
+#   - Dotted-segment prefix: "pkg.sub" matches "pkg.sub", "pkg.sub.mod", but
+#     NOT "pkg.subway". A bare "foo" does not match "foobar.baz".
+#   - Longest matching prefix wins (most specific). YAML order is irrelevant.
+#
+# Per-rule fields (at least one of `console` / `file` is required):
+#   console:      Override the console-sink threshold for this logger.
+#   file:         Override the file-sink   threshold for this logger.
+#   workers_only: If true, the override applies only in non-MainProcess
+#                 processes (e.g. PyTorch DataLoader workers). Useful for
+#                 silencing noisy first-time discovery logs that each worker
+#                 re-emits while keeping the main-process log informative.
+#
+# Unknown sub-keys and invalid levels raise at startup (no silent ignores).
+#
+# Third-party defaults: interception gates a few chronically chatty stdlib
+# loggers (asyncio, httpx, urllib3, datasets, filelock) at WARNING. A
+# module_levels rule targeting one of them lifts that stdlib gate so your
+# per-sink thresholds decide instead, e.g.:
+#
+#   "httpx":
+#     file: DEBUG     # full httpx detail on disk despite the default silence
+#
+# module_levels:
+#   # Demote a chatty logger to WARNING on the file sink, in workers only:
+#   "waivefront.rfuav.data.archive":
+#     file: WARNING
+#     workers_only: true
+#
+#   # Per-sink split + promotion below the global console_level:
+#   "noisy.lib.but.useful.in.debug":
+#     console: ERROR    # quiet on screen
+#     file: DEBUG       # but keep full detail on disk (below global file_level if any)
+#
+#   # Longest-prefix-wins example: "pkg.sub" overrides "pkg" for records under pkg.sub.*
+#   "pkg":
+#     file: WARNING
+#   "pkg.sub":
+#     file: DEBUG
