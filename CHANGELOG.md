@@ -5,6 +5,26 @@ All notable changes to Loggair are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **CLI diagnostic** — `python -m loggair` (`--json` for machine output)
+  prints the package version, the detected distributed rank and which
+  environment source decided it, which config files were found, the merged
+  file config, and the fully resolved settings. Strictly read-only: it never
+  creates the log directory, rotates, configures sinks, or writes env vars —
+  safe next to a live run; alert URLs are fully masked. Invalid configuration
+  is reported with context and exit code 1. Built on the new pure
+  `loggair.core.resolve_settings()` (configuration resolution extracted from
+  `configure_logging` into a single shared, side-effect-free source of truth)
+  and `loggair.discovery.detect_rank()` (rank + deciding source). Also
+  installed as the `loggair` console script, which is immune to mono-repo
+  package shadowing; the `-m` form detects a shadowing local `loggair/`
+  directory and SELF-HEALS (drops the offending path entry for its own
+  process, re-imports the real package, reports with a warning and a
+  `shadowed_path_ignored` JSON field); exit 2 only when no installation is
+  reachable at all.
+
 ## [0.1.0] - 2026-07-05
 
 Initial public release. Loggair is the continuation of the (unpublished)

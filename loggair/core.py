@@ -343,6 +343,178 @@ def _resolve_colorize(arg: Optional[bool]) -> Optional[bool]:
     return None
 
 
+def resolve_settings(
+    log_dir: Optional[Union[str, Path]] = None,
+    script_name: Optional[str] = None,
+    file_level: Optional[str] = None,
+    console_level: Optional[str] = None,
+    rotation_on_startup: Optional[bool] = None,
+    retention: Optional[int] = None,
+    compression: Optional[CompressionFormat] = None,
+    enqueue: Optional[bool] = None,
+    colorize: Optional[bool] = None,
+    serialize: Optional[bool] = None,
+    rotation: Optional[str] = None,
+    console_format: Optional[str] = None,
+    file_format: Optional[str] = None,
+    reload_signal: Optional[str] = None,
+    debug_signal: Optional[str] = None,
+    alert_urls: Optional[Union[str, List[str]]] = None,
+    alert_level: Optional[str] = None,
+    alert_throttle: Optional[float] = None,
+    worker_files: Optional[bool] = None,
+    intercept: Optional[str] = None,
+    intercept_exclude: Optional[Union[str, List[str]]] = None,
+    capture_warnings: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Resolve every setting through the full hierarchy — PURELY, no side effects.
+
+    The single source of truth for configuration resolution (args > ``LOGGAIR_*``
+    env > local YAML > pyproject > XDG > defaults), shared by
+    :func:`configure_logging` and the ``python -m loggair`` diagnostic. It MUST
+    stay free of side effects: no directory creation, no rotation, no sinks, no
+    env-var writes — a diagnostic that mutates the very state it inspects is a
+    footgun (see the AGENTS resolver-purity mandate). Validation still fails
+    fast here (unknown levels/modes/signals/compression raise ``ValueError``).
+
+    Returns a dict of the resolved values: JSON-serializable public keys (the
+    same vocabulary as :func:`get_active_config`) plus ``_``-prefixed internal
+    entries for :func:`configure_logging` (parsed rules, level numbers, `Path`
+    objects, the RAW alert URLs — never expose those; diagnostics must redact).
+    """
+    is_main_proc = current_process().name == "MainProcess" and discovery.get_rank() in (None, 0)
+
+    cfg = load_config()
+
+    def resolve(val: Any, env: str, key: str, default: Any) -> Any:
+        # Presence-based resolution — falsy-but-valid values (rotation_on_startup:
+        # false, retention: 0) must win over the default, so never `or`-chain here.
+        # An EMPTY env var counts as unset (matching the historical behavior).
+        if val is not None:
+            return val
+        env_val = os.getenv(env)
+        if env_val:
+            return env_val
+        if key in cfg and cfg[key] is not None:
+            return cfg[key]
+        return default
+
+    log_dir_val = resolve(log_dir, "LOGGAIR_DIR", "log_dir", "./logs")
+    log_dir_path = Path(log_dir_val).expanduser().resolve()
+
+    f_level = str(resolve(file_level, "LOGGAIR_FILE_LEVEL", "file_level", "DEBUG")).upper()
+    c_level = str(resolve(console_level, "LOGGAIR_CONSOLE_LEVEL", "console_level", "INFO")).upper()
+    f_no = _level_no(f_level, "file_level")
+    c_no = _level_no(c_level, "console_level")
+    module_rules = _parse_module_levels(cfg)
+    retention_val = int(resolve(retention, "LOGGAIR_RETENTION", "retention", 5))
+    do_rotation = _str_to_bool(resolve(rotation_on_startup, "LOGGAIR_ROTATION_ON_STARTUP", "rotation_on_startup", True))
+    enqueue_val = _str_to_bool(resolve(enqueue, "LOGGAIR_ENQUEUE", "enqueue", False))
+    serialize_val = _str_to_bool(resolve(serialize, "LOGGAIR_SERIALIZE", "serialize", False))
+    # JSON mode forces colors off: ANSI escapes would otherwise be embedded
+    # inside the serialized "text" field, garbling it for log aggregators.
+    colorize_val = False if serialize_val else _resolve_colorize(colorize)
+
+    console_fmt = str(resolve(console_format, "LOGGAIR_CONSOLE_FORMAT", "console_format", DEFAULT_CONSOLE_FORMAT))
+    file_fmt = str(resolve(file_format, "LOGGAIR_FILE_FORMAT", "file_format", DEFAULT_FILE_FORMAT))
+
+    rotation_val = resolve(rotation, "LOGGAIR_ROTATION", "rotation", None)
+    if rotation_val is not None:
+        rotation_val = str(rotation_val)
+
+    alert_urls_val = resolve(alert_urls, "LOGGAIR_ALERT_URLS", "alert_urls", None)
+    if isinstance(alert_urls_val, str):
+        alert_urls_list = [u.strip() for u in alert_urls_val.split(",") if u.strip()]
+    else:
+        alert_urls_list = [str(u) for u in alert_urls_val] if alert_urls_val else []
+    alert_level_val = str(resolve(alert_level, "LOGGAIR_ALERT_LEVEL", "alert_level", "ERROR")).upper()
+    _level_no(alert_level_val, "alert_level")  # fail fast on unknown level names
+    alert_throttle_val = float(resolve(alert_throttle, "LOGGAIR_ALERT_THROTTLE", "alert_throttle", 60.0))
+
+    intercept_val = str(resolve(intercept, "LOGGAIR_INTERCEPT", "intercept", "full")).lower()
+    if intercept_val not in _VALID_INTERCEPT_MODES:
+        raise ValueError(
+            f"intercept: invalid value {intercept_val!r}; expected one of {sorted(_VALID_INTERCEPT_MODES)}"
+        )
+    intercept_exclude_val = resolve(intercept_exclude, "LOGGAIR_INTERCEPT_EXCLUDE", "intercept_exclude", None)
+    if isinstance(intercept_exclude_val, str):
+        intercept_exclude_list = [p.strip() for p in intercept_exclude_val.split(",") if p.strip()]
+    else:
+        intercept_exclude_list = [str(p) for p in intercept_exclude_val] if intercept_exclude_val else []
+    capture_warnings_val = _str_to_bool(resolve(capture_warnings, "LOGGAIR_CAPTURE_WARNINGS", "capture_warnings", True))
+
+    reload_signal_val = resolve(reload_signal, "LOGGAIR_RELOAD_SIGNAL", "reload_signal", None)
+    debug_signal_val = resolve(debug_signal, "LOGGAIR_DEBUG_SIGNAL", "debug_signal", None)
+    # Validate eagerly (fail fast on a typo'd or platform-unavailable name),
+    # even in processes that won't install the handlers.
+    for sig_spec in (reload_signal_val, debug_signal_val):
+        if sig_spec is not None:
+            _resolve_signal(sig_spec)
+
+    compression_val = resolve(compression, "LOGGAIR_COMPRESSION", "compression", None)
+    if compression_val is not None:
+        compression_val = str(compression_val).lower()
+        if compression_val not in _VALID_COMPRESSIONS:
+            raise ValueError(
+                f"compression: invalid value {compression_val!r}; "
+                f"expected one of {sorted(_VALID_COMPRESSIONS)} or None"
+            )
+
+    target_name = discovery.determine_script_name(resolve(script_name, "LOGGAIR_SCRIPT_NAME", "script_name", None))
+
+    # Per-worker files: each non-main writer gets its own exclusively-owned
+    # file — rank suffix for DDP ranks, process-name suffix for children (a
+    # rank's own children carry both, e.g. app.rank2.worker-1.log).
+    worker_files_val = _str_to_bool(resolve(worker_files, "LOGGAIR_WORKER_FILES", "worker_files", False))
+    suffix_parts: List[str] = []
+    if worker_files_val and not is_main_proc:
+        rank = discovery.get_rank()
+        if rank not in (None, 0):
+            suffix_parts.append(f"rank{rank}")
+        if current_process().name != "MainProcess":
+            proc = re.sub(r"[^A-Za-z0-9_-]+", "-", current_process().name).strip("-").lower()
+            suffix_parts.append(proc or f"pid{os.getpid()}")
+    worker_suffix = "".join(f".{p}" for p in suffix_parts)
+    new_log_file = log_dir_path / f"{target_name}{worker_suffix}.log"
+
+    return {
+        # Public, JSON-serializable (get_active_config vocabulary):
+        "log_dir": str(log_dir_path),
+        "script_name": target_name,
+        "log_file": str(new_log_file),
+        "file_level": f_level,
+        "console_level": c_level,
+        "module_levels": dict(cfg.get("module_levels") or {}),
+        "rotation_on_startup": do_rotation,
+        "retention": retention_val,
+        "compression": compression_val,
+        "rotation": rotation_val,
+        "enqueue": bool(enqueue_val),
+        "colorize": colorize_val,
+        "serialize": serialize_val,
+        "console_format": console_fmt,
+        "file_format": file_fmt,
+        "reload_signal": reload_signal_val,
+        "debug_signal": debug_signal_val,
+        "alert_level": alert_level_val,
+        "alert_throttle": alert_throttle_val,
+        "worker_files": worker_files_val,
+        "intercept": intercept_val,
+        "intercept_exclude": list(intercept_exclude_list),
+        "capture_warnings": capture_warnings_val,
+        "is_main_process": is_main_proc,
+        "rank": discovery.get_rank(),
+        # Internal (never expose raw — alert URLs carry secrets):
+        "_log_dir_path": log_dir_path,
+        "_log_file_path": new_log_file,
+        "_worker_suffix": worker_suffix,
+        "_module_rules": module_rules,
+        "_console_no": c_no,
+        "_file_no": f_no,
+        "_alert_urls": alert_urls_list,
+    }
+
+
 def configure_logging(
     log_dir: Optional[Union[str, Path]] = None,
     script_name: Optional[str] = None,
@@ -470,115 +642,60 @@ def configure_logging(
     ``LOGGAIR_INTERCEPT`` / ``LOGGAIR_INTERCEPT_EXCLUDE`` /
     ``LOGGAIR_CAPTURE_WARNINGS`` env > matching YAML keys > defaults.
     """
-    is_main_proc = current_process().name == "MainProcess" and discovery.get_rank() in (
-        None,
-        0,
-    )
-
     if LoggingState.configured and not force:
         return
 
-    # 1. Resolve Parameters
-    cfg = load_config()
-
-    def resolve(val: Any, env: str, key: str, default: Any) -> Any:
-        # Presence-based resolution — falsy-but-valid values (rotation_on_startup:
-        # false, retention: 0) must win over the default, so never `or`-chain here.
-        # An EMPTY env var counts as unset (matching the historical behavior).
-        if val is not None:
-            return val
-        env_val = os.getenv(env)
-        if env_val:
-            return env_val
-        if key in cfg and cfg[key] is not None:
-            return cfg[key]
-        return default
-
-    log_dir_val = resolve(log_dir, "LOGGAIR_DIR", "log_dir", "./logs")
-    log_dir_path = Path(log_dir_val).expanduser().resolve()
-    log_dir_path.mkdir(parents=True, exist_ok=True)
-
-    f_level = str(resolve(file_level, "LOGGAIR_FILE_LEVEL", "file_level", "DEBUG")).upper()
-    c_level = str(resolve(console_level, "LOGGAIR_CONSOLE_LEVEL", "console_level", "INFO")).upper()
-    f_no = _level_no(f_level, "file_level")
-    c_no = _level_no(c_level, "console_level")
-    module_rules = _parse_module_levels(cfg)
-    retention_val = int(resolve(retention, "LOGGAIR_RETENTION", "retention", 5))
-    do_rotation = _str_to_bool(
-        resolve(
-            rotation_on_startup,
-            "LOGGAIR_ROTATION_ON_STARTUP",
-            "rotation_on_startup",
-            True,
-        )
+    # 1. Resolve Parameters — the PURE shared resolver (also serves the
+    # `python -m loggair` diagnostic); side effects happen only below.
+    settings = resolve_settings(
+        log_dir=log_dir,
+        script_name=script_name,
+        file_level=file_level,
+        console_level=console_level,
+        rotation_on_startup=rotation_on_startup,
+        retention=retention,
+        compression=compression,
+        enqueue=enqueue,
+        colorize=colorize,
+        serialize=serialize,
+        rotation=rotation,
+        console_format=console_format,
+        file_format=file_format,
+        reload_signal=reload_signal,
+        debug_signal=debug_signal,
+        alert_urls=alert_urls,
+        alert_level=alert_level,
+        alert_throttle=alert_throttle,
+        worker_files=worker_files,
+        intercept=intercept,
+        intercept_exclude=intercept_exclude,
+        capture_warnings=capture_warnings,
     )
-    enqueue_val = _str_to_bool(resolve(enqueue, "LOGGAIR_ENQUEUE", "enqueue", False))
-    serialize_val = _str_to_bool(resolve(serialize, "LOGGAIR_SERIALIZE", "serialize", False))
-    # JSON mode forces colors off: ANSI escapes would otherwise be embedded
-    # inside the serialized "text" field, garbling it for log aggregators.
-    colorize_val = False if serialize_val else _resolve_colorize(colorize)
+    is_main_proc = settings["is_main_process"]
+    log_dir_path: Path = settings["_log_dir_path"]
+    new_log_file: Path = settings["_log_file_path"]
+    worker_suffix: str = settings["_worker_suffix"]
+    module_rules = settings["_module_rules"]
+    c_no, f_no = settings["_console_no"], settings["_file_no"]
+    alert_urls_list = settings["_alert_urls"]
+    retention_val = settings["retention"]
+    do_rotation = settings["rotation_on_startup"]
+    enqueue_val = settings["enqueue"]
+    colorize_val = settings["colorize"]
+    serialize_val = settings["serialize"]
+    console_fmt, file_fmt = settings["console_format"], settings["file_format"]
+    rotation_val = settings["rotation"]
+    compression_val = settings["compression"]
+    alert_level_val = settings["alert_level"]
+    alert_throttle_val = settings["alert_throttle"]
+    intercept_val = settings["intercept"]
+    intercept_exclude_list = settings["intercept_exclude"]
+    capture_warnings_val = settings["capture_warnings"]
+    reload_signal_val = settings["reload_signal"]
+    debug_signal_val = settings["debug_signal"]
+    target_name = settings["script_name"]
 
-    console_fmt = str(resolve(console_format, "LOGGAIR_CONSOLE_FORMAT", "console_format", DEFAULT_CONSOLE_FORMAT))
-    file_fmt = str(resolve(file_format, "LOGGAIR_FILE_FORMAT", "file_format", DEFAULT_FILE_FORMAT))
-
-    rotation_val = resolve(rotation, "LOGGAIR_ROTATION", "rotation", None)
-    if rotation_val is not None:
-        rotation_val = str(rotation_val)
-
-    alert_urls_val = resolve(alert_urls, "LOGGAIR_ALERT_URLS", "alert_urls", None)
-    if isinstance(alert_urls_val, str):
-        alert_urls_list = [u.strip() for u in alert_urls_val.split(",") if u.strip()]
-    else:
-        alert_urls_list = [str(u) for u in alert_urls_val] if alert_urls_val else []
-    alert_level_val = str(resolve(alert_level, "LOGGAIR_ALERT_LEVEL", "alert_level", "ERROR")).upper()
-    _level_no(alert_level_val, "alert_level")  # fail fast on unknown level names
-    alert_throttle_val = float(resolve(alert_throttle, "LOGGAIR_ALERT_THROTTLE", "alert_throttle", 60.0))
-
-    intercept_val = str(resolve(intercept, "LOGGAIR_INTERCEPT", "intercept", "full")).lower()
-    if intercept_val not in _VALID_INTERCEPT_MODES:
-        raise ValueError(
-            f"intercept: invalid value {intercept_val!r}; expected one of {sorted(_VALID_INTERCEPT_MODES)}"
-        )
-    intercept_exclude_val = resolve(intercept_exclude, "LOGGAIR_INTERCEPT_EXCLUDE", "intercept_exclude", None)
-    if isinstance(intercept_exclude_val, str):
-        intercept_exclude_list = [p.strip() for p in intercept_exclude_val.split(",") if p.strip()]
-    else:
-        intercept_exclude_list = [str(p) for p in intercept_exclude_val] if intercept_exclude_val else []
-    capture_warnings_val = _str_to_bool(resolve(capture_warnings, "LOGGAIR_CAPTURE_WARNINGS", "capture_warnings", True))
-
-    reload_signal_val = resolve(reload_signal, "LOGGAIR_RELOAD_SIGNAL", "reload_signal", None)
-    debug_signal_val = resolve(debug_signal, "LOGGAIR_DEBUG_SIGNAL", "debug_signal", None)
-    # Validate eagerly (fail fast on a typo'd or platform-unavailable name),
-    # even in processes that won't install the handlers.
-    for sig_spec in (reload_signal_val, debug_signal_val):
-        if sig_spec is not None:
-            _resolve_signal(sig_spec)
-
-    compression_val = resolve(compression, "LOGGAIR_COMPRESSION", "compression", None)
-    if compression_val is not None:
-        compression_val = str(compression_val).lower()
-        if compression_val not in _VALID_COMPRESSIONS:
-            raise ValueError(
-                f"compression: invalid value {compression_val!r}; "
-                f"expected one of {sorted(_VALID_COMPRESSIONS)} or None"
-            )
-
-    target_name = discovery.determine_script_name(resolve(script_name, "LOGGAIR_SCRIPT_NAME", "script_name", None))
-
-    # Per-worker files: each non-main writer gets its own exclusively-owned
-    # file — rank suffix for DDP ranks, process-name suffix for children (a
-    # rank's own children carry both, e.g. app.rank2.worker-1.log).
-    worker_files_val = _str_to_bool(resolve(worker_files, "LOGGAIR_WORKER_FILES", "worker_files", False))
-    suffix_parts: List[str] = []
-    if worker_files_val and not is_main_proc:
-        rank = discovery.get_rank()
-        if rank not in (None, 0):
-            suffix_parts.append(f"rank{rank}")
-        if current_process().name != "MainProcess":
-            proc = re.sub(r"[^A-Za-z0-9_-]+", "-", current_process().name).strip("-").lower()
-            suffix_parts.append(proc or f"pid{os.getpid()}")
-    worker_suffix = "".join(f".{p}" for p in suffix_parts)
-    new_log_file = log_dir_path / f"{target_name}{worker_suffix}.log"
+    log_dir_path.mkdir(parents=True, exist_ok=True)
 
     # 2. PIVOT & ROTATION
     if is_main_proc:
@@ -716,41 +833,18 @@ def configure_logging(
     )
     LoggingState.last_kwargs = {k: v for k, v in explicit.items() if v is not None}
 
-    # Snapshot the RESOLVED settings for get_active_config (JSON-serializable:
-    # paths as str, module_levels as the validated raw mapping).
-    LoggingState.active_config = {
-        "configured": True,
-        "log_dir": str(log_dir_path),
-        "script_name": target_name,
-        "log_file": str(new_log_file),
-        "file_level": f_level,
-        "console_level": c_level,
-        "module_levels": dict(cfg.get("module_levels") or {}),
-        "rotation_on_startup": do_rotation,
-        "retention": retention_val,
-        "compression": compression_val,
-        "rotation": rotation_val,
-        "enqueue": bool(enqueue_val),
-        "enqueue_active": LoggingState.enqueue_active,
-        "colorize": colorize_val,
-        "serialize": serialize_val,
-        "console_format": console_fmt,
-        "file_format": file_fmt,
-        "reload_signal": reload_signal_val,
-        "debug_signal": debug_signal_val,
-        "debug_mode_active": LoggingState.debug_active,
-        # SECRET-SAFE: apprise privacy-redacted forms (tokens masked), never
-        # the raw URLs — this dict is a diagnostics/MCP payload.
-        "alert_urls": (LoggingState.alert_dispatcher.redacted_urls if LoggingState.alert_dispatcher else []),
-        "alert_level": alert_level_val,
-        "alert_throttle": alert_throttle_val,
-        "worker_files": worker_files_val,
-        "intercept": intercept_val,
-        "intercept_exclude": list(intercept_exclude_list),
-        "capture_warnings": capture_warnings_val,
-        "is_main_process": is_main_proc,
-        "rank": discovery.get_rank(),
-    }
+    # Snapshot the RESOLVED settings for get_active_config: derived straight
+    # from the shared resolver output (single source of truth), minus the
+    # "_"-internal keys, plus the runtime-state fields. SECRET-SAFE: the raw
+    # alert URLs are replaced by apprise's privacy-redacted forms — this dict
+    # is a diagnostics/MCP payload and must never carry tokens.
+    LoggingState.active_config = {k: v for k, v in settings.items() if not k.startswith("_")}
+    LoggingState.active_config.update(
+        configured=True,
+        enqueue_active=LoggingState.enqueue_active,
+        debug_mode_active=LoggingState.debug_active,
+        alert_urls=(LoggingState.alert_dispatcher.redacted_urls if LoggingState.alert_dispatcher else []),
+    )
 
     if is_main_proc:
         os.environ["LOGGAIR_SCRIPT_NAME"] = target_name

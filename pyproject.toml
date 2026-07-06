@@ -33,6 +33,13 @@ dependencies = [
 ]
 requires-python = ">=3.12"
 
+[project.scripts]
+# The diagnostic as a console script: entry-point scripts do NOT put the cwd
+# on sys.path, so `loggair` works from ANY directory — including a workspace
+# root containing a loggair/ project folder, where `python -m loggair` gets
+# namespace-shadowed under an editable install (see README §18).
+loggair = "loggair.__main__:main"
+
 [project.optional-dependencies]
 # Webhook/alerting sink (alert_urls): apprise delivers to ~100 services
 # (Slack, Teams, email, generic webhooks) via URL configs — see README §15.
