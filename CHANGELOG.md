@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-07-05
 
 Initial public release. Loggair is the continuation of the (unpublished)
-LogFlow project under a clean name where the PyPI distribution and the import
+Loggair project under a clean name where the PyPI distribution and the import
 package are both `loggair`.
 
 ### Added
