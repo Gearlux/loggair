@@ -76,11 +76,23 @@ def _compress_file(path: Path, compression: str) -> Path:
 
 
 def _purge_old_files(candidates: List[Path], keep: int) -> None:
-    """Keep the `keep` most recent files by mtime, delete the rest."""
-    by_age = sorted(candidates, key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
-    for old in by_age[keep:]:
+    """Keep the `keep` most recent files by mtime, delete the rest.
+
+    In a SHARED log dir (the centralized ``~/logs``) another process may purge
+    the same stem's archives concurrently, so any candidate can vanish between
+    the directory listing and the ``stat()``/``unlink()`` here — a TOCTOU race
+    no pre-check can close. A vanished file is simply someone else's completed
+    purge: drop it from the ranking and never warn about unlinking it.
+    """
+    dated = []
+    for p in candidates:
         try:
-            old.unlink()
+            dated.append((p.stat().st_mtime, p.name, p))
+        except OSError:
+            continue
+    for _, _, old in sorted(dated, reverse=True)[keep:]:
+        try:
+            old.unlink(missing_ok=True)
         except Exception as e:
             warnings.warn(f"Loggair: Failed to purge old log file {old}: {e}")
 

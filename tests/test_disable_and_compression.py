@@ -17,6 +17,7 @@ import pytest
 from loggair import core
 from loggair.core import _compress_file, _rotate, configure_logging, get_logger, is_configured, shutdown_logging
 from loggair.null_logger import NullLogger, _NullLevel
+from loggair.rotation import _purge_old_files
 
 # ---------------------------------------------------------------------------
 # NullLogger API
@@ -319,6 +320,59 @@ def test_rotate_compresses_then_retains_compressed_archives(tmp_path: Path) -> N
     with gzip.open(newest, "rt") as fh:
         assert fh.read() == "CURRENT"
     assert not active.exists()  # original was rotated away
+
+
+def test_purge_tolerates_candidate_vanishing_before_stat(tmp_path: Path, recwarn: Any) -> None:
+    """A concurrent process (shared ``~/logs``) may purge the same stem's archives
+    between our directory listing and the ``stat()`` — the vanished file must be
+    skipped silently, and retention still enforced on the survivors."""
+    files = []
+    for i in range(3):
+        f = tmp_path / f"app.2026-01-01_00-00-0{i}.log"
+        f.write_text("old")
+        mt = 1_000_000.0 + i
+        os.utime(f, (mt, mt))
+        files.append(f)
+    ghost = tmp_path / "app.2026-01-01_00-00-09.log"  # listed by the other process's victim, never created
+
+    _purge_old_files(files + [ghost], keep=1)
+
+    survivors = sorted(p.name for p in tmp_path.glob("app.*.log"))
+    assert survivors == ["app.2026-01-01_00-00-02.log"]  # newest of the REAL files kept
+    assert not [w for w in recwarn.list if issubclass(w.category, UserWarning)]
+
+
+def test_purge_tolerates_file_vanishing_between_stat_and_unlink(tmp_path: Path, monkeypatch: Any, recwarn: Any) -> None:
+    """The concurrent-purge race can also strike after ranking: ``unlink`` on an
+    already-deleted file must not warn (someone else's purge finished our job)."""
+    files = []
+    for i in range(3):
+        f = tmp_path / f"app.2026-01-01_00-00-0{i}.log"
+        f.write_text("old")
+        mt = 1_000_000.0 + i
+        os.utime(f, (mt, mt))
+        files.append(f)
+    victim = files[0]  # oldest → a purge target
+
+    orig_stat = Path.stat
+    removed = False
+
+    def _stat(self: Path, **kwargs: Any) -> Any:
+        nonlocal removed
+        result = orig_stat(self, **kwargs)
+        if self == victim and not removed:
+            removed = True
+            os.remove(victim)  # the other process deletes it right after our stat
+        return result
+
+    monkeypatch.setattr(Path, "stat", _stat)
+
+    _purge_old_files(files, keep=1)
+
+    monkeypatch.undo()
+    survivors = sorted(p.name for p in tmp_path.glob("app.*.log"))
+    assert survivors == ["app.2026-01-01_00-00-02.log"]
+    assert not [w for w in recwarn.list if issubclass(w.category, UserWarning)]
 
 
 def test_compress_file_failure_preserves_uncompressed_original(tmp_path: Path, monkeypatch: Any) -> None:
