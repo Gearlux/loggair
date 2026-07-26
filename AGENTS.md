@@ -1,5 +1,9 @@
 # Loggair Mandates
 
+## Current state
+
+**Feature-complete** logging engine (loguru-backed); v0.1.0 released (tag-driven). Published project → feature/fix PRs on `Gearlux/loggair` (`main` ← `dev/main`).
+
 - **Rank-Zero Console:** In distributed environments, console output MUST be filtered to Rank 0 only. File logging captures all ranks with rank tags.
 - **Multiprocess Safety:** All sinks MUST use Loguru's `enqueue=True` whenever multiple processes will write. The underlying `multiprocessing.SimpleQueue` is created **lazily** — deferred until something actually forks or spawns a child — so a request for `enqueue=True` does not allocate a POSIX semaphore in single-process runs. Hooks fire in `os.register_at_fork(before=...)` and a one-shot `multiprocessing.process.BaseProcess.__init__` patch. Set `LOGGAIR_EAGER_ENQUEUE=true` to force allocation at handler-creation time (rare; needed only when something bypasses both hook surfaces).
 - **Log File Locations:** By default, Loggair resolves logs to `./logs`. However, in this workspace, the global configuration at `~/.config/loggair/config.yaml` redirects all logs to `~/logs` for centralized persistence. Always check `~/logs` when debugging local execution.
