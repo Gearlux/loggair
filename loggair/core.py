@@ -333,7 +333,7 @@ def _resolve_colorize(arg: Optional[bool]) -> Optional[bool]:
     https://no-color.org) > ``None`` (loguru auto-detect via ``stream.isatty()``,
     the historical default). ``NO_COLOR`` is the ONLY environment control — there
     is no bespoke Loggair color env var. Non-interactive consumers (the
-    navigaitor MCP server, the FluxStudio ComfyUI extension) set ``NO_COLOR`` for
+    navigaitor MCP server, the StreamStudio ComfyUI extension) set ``NO_COLOR`` for
     themselves via :func:`force_no_color`.
     """
     if arg is not None:
@@ -949,7 +949,7 @@ def force_no_color() -> None:
        ``configure_logging`` returns early. Only a reload re-resolves it.
 
     Call this at import time in a process whose stderr is captured or relayed —
-    the navigaitor MCP server, the FluxStudio ComfyUI extension — ideally before
+    the navigaitor MCP server, the StreamStudio ComfyUI extension — ideally before
     the first ``get_logger``, but it self-heals via the reload if not.
     """
     os.environ.setdefault("NO_COLOR", "1")
