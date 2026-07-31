@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `shadowed_path_ignored` JSON field); exit 2 only when no installation is
   reachable at all.
 
+### Fixed
+- **Retention purge no longer crashes when another process purges the same
+  stem concurrently.** In a shared log directory, an archive could vanish
+  between the directory listing and the `stat()`/`unlink()` inside
+  `_purge_old_files`, raising `FileNotFoundError` out of `configure_logging`.
+  Vanished candidates are now skipped silently (someone else's purge simply
+  finished first); retention is still enforced on the surviving archives.
+
 ## [0.1.0] - 2026-07-05
 
 Initial public release. Loggair is the continuation of the (unpublished)

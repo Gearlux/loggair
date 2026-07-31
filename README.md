@@ -220,7 +220,7 @@ loggair.force_no_color()  # setdefault NO_COLOR=1 + reload if already configured
 reloads loggair if it was already configured — because env inheritance alone
 doesn't help once a coloring decision is baked into the live sink. The
 [navigaitor](https://github.com/Gearlux/navigaitor) MCP server and the
-[FluxStudio](https://github.com/Gearlux/fluxstudio) ComfyUI extension call it at
+[StreamStudio](https://github.com/Gearlux/streamstudio) ComfyUI extension call it at
 import; to deliberately re-allow colors there, pre-set `NO_COLOR=` (empty).
 
 ### 5. Disabling Logging
