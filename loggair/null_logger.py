@@ -92,6 +92,7 @@ class NullLogger:
 
     _LEVELS = {
         "TRACE": 5,
+        "TRAIL": 7,
         "DEBUG": 10,
         "INFO": 20,
         "SUCCESS": 25,

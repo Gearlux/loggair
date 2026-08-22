@@ -25,10 +25,16 @@ from loggair.core import (
     shutdown_logging,
 )
 
+# Imported for its SIDE EFFECT as much as its exports: it registers the TRAIL
+# level with loguru, which `configure_logging` must be able to resolve from a
+# config file (`file_level: TRAIL`) without the user importing anything extra.
+from loggair.track import TRAIL, spy, track
+
 __all__ = [
     "DEFAULT_CONSOLE_FORMAT",
     "__version__",
     "DEFAULT_FILE_FORMAT",
+    "TRAIL",
     "clear_context",
     "configure_logging",
     "context",
@@ -41,4 +47,6 @@ __all__ = [
     "reset_logging",
     "set_context",
     "shutdown_logging",
+    "spy",
+    "track",
 ]

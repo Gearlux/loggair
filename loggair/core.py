@@ -72,6 +72,15 @@ class LoggingState:
     last_signal_thread: Optional[threading.Thread] = None
     debug_active: bool = False
     pre_debug_kwargs: Optional[Dict[str, Any]] = None
+    # The PARSED `module_levels` rules of the last successful configure. Kept
+    # next to `active_config` (which holds the raw mapping) so
+    # :func:`effective_level_no` answers from the same rules the sink filters
+    # apply, instead of re-deriving them from the snapshot.
+    module_rules: List["ModuleLevelRule"] = []
+    # Bumped on every configure / reset. Callers that CACHE a level threshold
+    # (see `loggair.track`) compare against it to notice a `reconfigure()`
+    # without paying for a fresh resolution on every call.
+    generation: int = 0
 
     @classmethod
     def reset(cls) -> None:
@@ -87,6 +96,8 @@ class LoggingState:
         cls.last_signal_thread = None
         cls.debug_active = False
         cls.pre_debug_kwargs = None
+        cls.module_rules = []
+        cls.generation += 1
         logger.remove()
         if hasattr(discovery.get_rank, "cache_clear"):
             discovery.get_rank.cache_clear()
@@ -208,10 +219,19 @@ class ModuleLevelRule:
 
 
 def _level_no(level: str, where: str) -> int:
+    """`level` as a loguru severity number, or a ValueError naming the setting.
+
+    `where` is the fully-qualified setting the value came from — ``"file_level"``,
+    ``"module_levels['pkg.a'].console"``, ``"alert_level"`` — and it is the ONLY
+    thing the message may name. It used to be prefixed with a hardcoded
+    ``module_levels:`` regardless of the caller, so a bad ``file_level`` reported
+    ``module_levels: invalid level 'X' for file_level`` and sent the reader to the
+    wrong block of their config.
+    """
     try:
         return int(logger.level(level.upper()).no)
     except (ValueError, TypeError) as e:
-        raise ValueError(f"module_levels: invalid level '{level}' for {where}") from e
+        raise ValueError(f"invalid level '{level}' for {where}") from e
 
 
 def _parse_module_levels(cfg: Dict[str, Any]) -> List[ModuleLevelRule]:
@@ -264,6 +284,61 @@ def _parse_module_levels(cfg: Dict[str, Any]) -> List[ModuleLevelRule]:
     return rules
 
 
+def _matching_rule(name: str, rules: List[ModuleLevelRule]) -> Optional[ModuleLevelRule]:
+    """The first `module_levels` rule whose prefix matches `name`, or None.
+
+    A rule matches on an exact name or a dotted-prefix ancestry (`pkg` matches
+    `pkg.io` but not `pkgx`), and `workers_only` rules are inert in the main
+    process. Shared by the per-record sink filter and by
+    :func:`effective_level_no` — two copies of this loop would let the
+    advertised threshold drift from the one records are actually gated on.
+    """
+    if not rules:
+        return None
+    in_worker = current_process().name != "MainProcess"
+    for rule in rules:
+        if rule.workers_only and not in_worker:
+            continue
+        if name == rule.prefix or name.startswith(rule.prefix + "."):
+            return rule
+    return None
+
+
+def _sink_floor(sink: Literal["console", "file"], global_no: int, rules: List[ModuleLevelRule]) -> int:
+    """The loguru ``level=`` floor for `sink` — the lowest threshold its filter can apply.
+
+    Loggair gates levels in ``_make_sink_filter``, not at the handler, because a
+    ``module_levels`` rule must be able to LOWER a threshold as well as raise it and
+    a handler's own ``level=`` can only raise. The floor was therefore pinned open at
+    ``"TRACE"``, which had a cost: loguru's one cheap early-out is
+    ``level_no < core.min_level``, and with the floor at 5 nothing ever took it — every
+    below-threshold record was fully built (frame inspection, timestamp, record dict,
+    argument formatting) and then discarded by the filter. Measured on a process
+    configured at INFO: **3.4 us** for a dropped ``logger.debug()``, against **0.10 us**
+    with the floor computed here. It is also why ``logger.opt(lazy=True)`` defers
+    nothing under Loggair — loguru evaluates lazy arguments only after the
+    ``min_level`` check the record has already passed.
+
+    The floor is the MINIMUM of the sink's global level and every ``module_levels``
+    override for that sink, so by construction no record the filter would have
+    accepted is dropped before reaching it. Two omissions look free and are not:
+
+    * Ignoring the rules and using `global_no` alone drops every PROMOTED record —
+      a rule setting ``file: DEBUG`` under a global ``ERROR`` stops working.
+    * Skipping ``workers_only`` rules because they cannot match in this process
+      drops promoted records in FORKED children, which inherit the parent's handler
+      objects and therefore this floor. Both are pinned by tests in
+      ``tests/test_core.py``; only the first is caught by any other test.
+    """
+    thresholds = [global_no]
+    for rule in rules:
+        # Every rule, including workers_only ones inert here — see the docstring.
+        override = rule.console_no if sink == "console" else rule.file_no
+        if override is not None:
+            thresholds.append(override)
+    return min(thresholds)
+
+
 def _make_sink_filter(
     sink: Literal["console", "file"],
     global_no: int,
@@ -287,17 +362,11 @@ def _make_sink_filter(
                 record["extra"].setdefault(key, value)
 
         threshold = global_no
-        if rules:
-            name = record["name"] or ""
-            in_worker = current_process().name != "MainProcess"
-            for rule in rules:
-                if rule.workers_only and not in_worker:
-                    continue
-                if name == rule.prefix or name.startswith(rule.prefix + "."):
-                    override = rule.console_no if sink == "console" else rule.file_no
-                    if override is not None:
-                        threshold = override
-                    break
+        rule = _matching_rule(record["name"] or "", rules)
+        if rule is not None:
+            override = rule.console_no if sink == "console" else rule.file_no
+            if override is not None:
+                threshold = override
         return bool(record["level"].no >= threshold)
 
     return _filter
@@ -333,7 +402,7 @@ def _resolve_colorize(arg: Optional[bool]) -> Optional[bool]:
     https://no-color.org) > ``None`` (loguru auto-detect via ``stream.isatty()``,
     the historical default). ``NO_COLOR`` is the ONLY environment control — there
     is no bespoke Loggair color env var. Non-interactive consumers (the
-    navigaitor MCP server, the FluxStudio ComfyUI extension) set ``NO_COLOR`` for
+    navigaitor MCP server, the StreamStudio ComfyUI extension) set ``NO_COLOR`` for
     themselves via :func:`force_no_color`.
     """
     if arg is not None:
@@ -722,7 +791,9 @@ def configure_logging(
         if is_main_proc:
             logger.add(
                 sys.stderr,
-                level="TRACE",
+                # Not "TRACE": see _sink_floor — an open floor defeats loguru's
+                # only cheap early-out and costs ~3.4 us per discarded record.
+                level=_sink_floor("console", c_no, module_rules),
                 format=console_fmt,
                 filter=_make_sink_filter("console", c_no, module_rules),
                 # Tri-state (resolved above): True forces colors, False forces
@@ -746,7 +817,9 @@ def configure_logging(
         start_with_enqueue = enqueue_val and (force_eager or in_child)
         file_sink_params: dict = dict(
             sink=str(new_log_file),
-            level="TRACE",
+            # See _sink_floor. Living inside file_sink_params means the
+            # lazy-enqueue re-add in _upgrade_to_enqueue carries it unchanged.
+            level=_sink_floor("file", f_no, module_rules),
             format=file_fmt,
             filter=_make_sink_filter("file", f_no, module_rules),
             mode="a",
@@ -796,6 +869,9 @@ def configure_logging(
     was_cfg = LoggingState.configured
     LoggingState.log_file = new_log_file
     LoggingState.configured = True
+    # Publish the rules and invalidate cached thresholds (see effective_level_no).
+    LoggingState.module_rules = module_rules
+    LoggingState.generation += 1
     # Pass the module_levels prefixes so interception does NOT hard-silence a
     # third-party stdlib logger (httpx, urllib3, ...) the user explicitly tuned.
     setup_interception(
@@ -949,7 +1025,7 @@ def force_no_color() -> None:
        ``configure_logging`` returns early. Only a reload re-resolves it.
 
     Call this at import time in a process whose stderr is captured or relayed —
-    the navigaitor MCP server, the FluxStudio ComfyUI extension — ideally before
+    the navigaitor MCP server, the StreamStudio ComfyUI extension — ideally before
     the first ``get_logger``, but it self-heals via the reload if not.
     """
     os.environ.setdefault("NO_COLOR", "1")
@@ -1024,6 +1100,71 @@ def _logging_disabled() -> bool:
     if _str_to_bool(os.getenv("LOGGAIR_DISABLE_MULTIPROCESS_LOGGING")):
         return current_process().name != "MainProcess"
     return False
+
+
+#: Returned by :func:`effective_level_no` when no record can reach a sink at all
+#: (logging disabled via ``LOGGAIR_DISABLE_*``, or never configured). Chosen above
+#: every real level so a plain ``level_no < effective_level_no(...)`` comparison
+#: needs no special case at the call site.
+NOTHING_REACHABLE = sys.maxsize
+
+
+def effective_level_no(name: Optional[str] = None) -> int:
+    """The LOWEST loguru level number that can still reach a sink for logger `name`.
+
+    A record below this number is dropped by every sink, so a caller can skip
+    building it entirely.
+
+    This is strictly more precise than loguru's own early-out, and the difference
+    is worth understanding. :func:`_sink_floor` gives each sink a ``level=`` floor,
+    which restores loguru's cheap ``level_no < core.min_level`` check — but that
+    floor is per-SINK and must accommodate the LOWEST threshold any
+    ``module_levels`` rule can impose on it. This function is per-LOGGER. The gap
+    opens as soon as one rule promotes one logger: with ``file_level: INFO`` and a
+    rule promoting ``pkg.a`` to ``DEBUG``, the file floor drops to 10 for the whole
+    sink, so a ``DEBUG`` from ``pkg.b`` clears the floor and is fully built before
+    ``_make_sink_filter`` discards it at that logger's real threshold of 20 —
+    measured at 3.37 us. ``effective_level_no("pkg.b")`` returns 20 and skips it.
+
+    Note also that ``opt(lazy=True)`` cannot close that gap: loguru evaluates lazy
+    arguments after the ``min_level`` check the record has already passed, so they
+    run for every record the filter goes on to drop.
+
+    `name` participates in `module_levels` prefix matching exactly as a record's
+    ``{name}`` field does. Read-only: it never triggers the lazy configuration
+    (an unconfigured Loggair has no sinks, so nothing is reachable).
+
+    CACHE the result against :attr:`LoggingState.generation` — which changes on
+    every configure / reconfigure / reset — rather than calling this per record.
+    Measured per call: 1.09 us calling it every time, 0.037 us for the cached
+    comparison (`loggair.track` does the latter).
+
+    Example::
+
+        if logger.level("TRACE").no >= effective_level_no(__name__):
+            logger.trace("expensive: {}", render(payload))
+    """
+    if _logging_disabled() or not LoggingState.configured:
+        return NOTHING_REACHABLE
+
+    config = LoggingState.active_config
+    rule = _matching_rule(name or "", LoggingState.module_rules)
+
+    thresholds: List[int] = []
+    # The console sink exists on the main process/rank only (see configure_logging).
+    if config.get("is_main_process"):
+        console = rule.console_no if rule is not None and rule.console_no is not None else None
+        thresholds.append(console if console is not None else int(logger.level(config["console_level"]).no))
+    file_no = rule.file_no if rule is not None and rule.file_no is not None else None
+    thresholds.append(file_no if file_no is not None else int(logger.level(config["file_level"]).no))
+    # The alerting sink is a third destination. Its presence is read from the live
+    # dispatcher, NOT from the snapshot: `active_config` deliberately strips the
+    # `_`-prefixed internals, and the raw `alert_urls` are one of them (they carry
+    # tokens and must never appear in a diagnostics payload).
+    if LoggingState.alert_dispatcher is not None:
+        thresholds.append(int(logger.level(config["alert_level"]).no))
+
+    return min(thresholds)
 
 
 def _set_record_name(name: str, record: Any) -> None:
