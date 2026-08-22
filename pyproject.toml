@@ -108,6 +108,15 @@ strict_optional = true
 module = "loguru.*"
 ignore_missing_imports = true
 
+# Confluid enriches @spy's parameter rendering and is imported lazily inside
+# `loggair.track`. It can NEVER be a dependency here — it depends on Loggair —
+# so it is absent from this project's CI by design, and mypy must not treat that
+# absence as an error. (A workspace checkout has it on `mypy_path`, which is why
+# this only ever fails standalone.)
+[[tool.mypy.overrides]]
+module = "confluid.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
