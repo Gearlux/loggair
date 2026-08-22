@@ -77,15 +77,21 @@ retention: 5
 # serialize: true
 
 # --- Log Levels ---
+#
+# Loggair registers one level of its own, TRAIL (severity 7), which sits between
+# TRACE (5) and DEBUG (10). It carries the call tracing emitted by the @track and
+# @spy decorators — see README section 19. Because it is ABOVE trace, running at
+# TRACE shows call tracing too; set a sink to TRAIL to see tracing without the
+# rest of TRACE.
 
 # Minimum level for logs written to the persistent file.
-# Options: TRACE, DEBUG, INFO, SUCCESS, WARNING, ERROR, CRITICAL
+# Options: TRACE, TRAIL, DEBUG, INFO, SUCCESS, WARNING, ERROR, CRITICAL
 # Default: "DEBUG"
 # Env: LOGGAIR_FILE_LEVEL
 file_level: "DEBUG"
 
 # Minimum level for logs displayed in the console.
-# Options: TRACE, DEBUG, INFO, SUCCESS, WARNING, ERROR, CRITICAL
+# Options: TRACE, TRAIL, DEBUG, INFO, SUCCESS, WARNING, ERROR, CRITICAL
 # Default: "INFO"
 # Env: LOGGAIR_CONSOLE_LEVEL
 console_level: "INFO"
@@ -224,3 +230,9 @@ console_level: "INFO"
 #     file: WARNING
 #   "pkg.sub":
 #     file: DEBUG
+#
+#   # Call tracing (@track / @spy) for ONE module, on the file sink only. This is
+#   # the intended way to use TRAIL: switching it on globally traces every
+#   # decorated function in the process.
+#   "mypkg.io":
+#     file: TRAIL

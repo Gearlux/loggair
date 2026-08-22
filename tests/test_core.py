@@ -1,5 +1,6 @@
 import io
 import json
+import multiprocessing as mp
 import os
 import re
 import signal
@@ -14,6 +15,7 @@ from loggair.core import (
     _ARCHIVE_RE,
     LoggingState,
     _resolve_colorize,
+    _upgrade_to_enqueue,
     configure_logging,
     force_no_color,
     get_logger,
@@ -409,6 +411,36 @@ def test_module_levels_invalid_level_raises(tmp_path: Path) -> None:
         os.chdir(old_cwd)
 
 
+def test_invalid_level_error_names_the_setting_it_came_from(tmp_path: Path) -> None:
+    """A bad sink level must not be reported as a `module_levels` problem.
+
+    The message used to carry a hardcoded `module_levels:` prefix whatever the
+    caller was, so a typo in `file_level` sent the reader to the wrong block.
+    """
+    with pytest.raises(ValueError) as exc:
+        configure_logging(log_dir=tmp_path / "logs", script_name="bad", file_level="BOGUS")
+    message = str(exc.value)
+    assert "file_level" in message
+    assert "BOGUS" in message
+    assert "module_levels" not in message
+
+
+def test_invalid_module_levels_entry_still_names_its_rule(tmp_path: Path) -> None:
+    """The other side of the same fix: a rule-scoped error keeps its full path."""
+    _write_yaml(
+        tmp_path / "loggair.yaml",
+        'file_level: "DEBUG"\nmodule_levels:\n  "pkg.a":\n    console: BOGUS\n',
+    )
+    old_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        with pytest.raises(ValueError) as exc:
+            configure_logging(log_dir=tmp_path / "logs", script_name="bad_rule")
+        assert "module_levels['pkg.a'].console" in str(exc.value)
+    finally:
+        os.chdir(old_cwd)
+
+
 def test_module_levels_unknown_subkey_raises(tmp_path: Path) -> None:
     """Typo guard — silent ignores are how this feature rotted unimplemented."""
     _write_yaml(
@@ -422,6 +454,132 @@ def test_module_levels_unknown_subkey_raises(tmp_path: Path) -> None:
             configure_logging(log_dir=tmp_path / "logs", script_name="typo")
     finally:
         os.chdir(old_cwd)
+
+
+# --- Sink floors -----------------------------------------------------------
+#
+# Both sinks are added with a loguru `level=` floor computed by `_sink_floor`.
+# The floor must never exceed the LOWEST threshold that sink's filter could
+# apply, or records the filter would have accepted are dropped before it runs —
+# silently, because a handler-level rejection leaves no trace anywhere.
+
+
+def _emit_in_forked_child(marker: str) -> None:
+    """Emit a promoted record from a forked child WITHOUT reconfiguring.
+
+    Module-level so the fork target is importable; deliberately does not call
+    configure_logging, because inheriting the parent's sinks is the case under
+    test.
+    """
+    _emit("pkg.a", "DEBUG", marker)
+    logger.complete()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork start method unavailable on this platform")
+def test_sink_floor_admits_a_workers_only_promotion_in_a_forked_child(tmp_path: Path) -> None:
+    """A `workers_only` rule is inert HERE but not in a forked child.
+
+    Excluding inert rules from the floor looks free — the rule cannot match in
+    the main process — but a forked child inherits the parent's handler objects,
+    and therefore the parent's floor. Cutting the promotion off at that floor
+    drops exactly the worker records the rule exists to capture, and no other
+    test in this suite notices.
+    """
+    _write_yaml(
+        tmp_path / "loggair.yaml",
+        'file_level: "ERROR"\nconsole_level: "ERROR"\n'
+        'module_levels:\n  "pkg.a":\n    file: DEBUG\n    workers_only: true\n',
+    )
+    old_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        configure_logging(log_dir=tmp_path / "logs", script_name="wo", enqueue=True)
+        _emit("pkg.a", "DEBUG", "main-must-be-dropped")
+
+        proc = mp.get_context("fork").Process(target=_emit_in_forked_child, args=("child-must-survive",))
+        proc.start()
+        proc.join(timeout=30)
+        assert proc.exitcode == 0
+        shutdown_logging()
+
+        text = (tmp_path / "logs" / "wo.log").read_text()
+        assert "child-must-survive" in text
+        assert "main-must-be-dropped" not in text
+    finally:
+        os.chdir(old_cwd)
+
+
+def test_sink_floors_are_computed_per_sink(tmp_path: Path) -> None:
+    """A rule promoting only the console must not drag the file floor down with it."""
+    _write_yaml(
+        tmp_path / "loggair.yaml",
+        'file_level: "ERROR"\nconsole_level: "ERROR"\n' 'module_levels:\n  "pkg.a":\n    console: DEBUG\n',
+    )
+    old_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        stream = io.StringIO()
+        configure_logging(log_dir=tmp_path / "logs", script_name="split_floor")
+        logger.add(stream, level="TRACE", format="{name}|{level}|{message}", filter=lambda r: True)
+        _emit("pkg.a", "DEBUG", "console-only-promotion")
+        shutdown_logging()
+
+        # Promoted on the console sink, still gated at ERROR on the file sink.
+        assert "console-only-promotion" in stream.getvalue()
+        assert "console-only-promotion" not in (tmp_path / "logs" / "split_floor.log").read_text()
+    finally:
+        os.chdir(old_cwd)
+
+
+def test_sink_floor_is_recomputed_when_levels_change_at_runtime(tmp_path: Path) -> None:
+    """`reconfigure` rebuilds the sinks, so the floor must follow the new levels."""
+    configure_logging(log_dir=tmp_path / "logs", script_name="refloor", console_level="ERROR", file_level="ERROR")
+    _emit("pkg.a", "DEBUG", "before-reconfigure")
+
+    reconfigure(console_level="DEBUG", file_level="DEBUG")
+    _emit("pkg.a", "DEBUG", "after-reconfigure")
+    shutdown_logging()
+
+    text = (tmp_path / "logs" / "refloor.log").read_text()
+    assert "before-reconfigure" not in text
+    assert "after-reconfigure" in text
+
+
+def test_enqueue_upgrade_preserves_the_sink_floor(tmp_path: Path) -> None:
+    """The lazy-enqueue re-add copies `file_sink_params`, which carries `level`."""
+    _write_yaml(
+        tmp_path / "loggair.yaml",
+        'file_level: "ERROR"\nconsole_level: "ERROR"\nmodule_levels:\n  "pkg.a":\n    file: DEBUG\n',
+    )
+    old_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        configure_logging(log_dir=tmp_path / "logs", script_name="upfloor", enqueue=True)
+        _upgrade_to_enqueue()
+        assert LoggingState.enqueue_active
+
+        _emit("pkg.a", "DEBUG", "promoted-after-upgrade")
+        _emit("pkg.b", "DEBUG", "unpromoted-after-upgrade")
+        shutdown_logging()
+
+        text = (tmp_path / "logs" / "upfloor.log").read_text()
+        assert "promoted-after-upgrade" in text
+        assert "unpromoted-after-upgrade" not in text
+    finally:
+        os.chdir(old_cwd)
+
+
+def test_an_external_sink_does_not_leak_records_into_loggair_sinks(tmp_path: Path) -> None:
+    """A user sink at TRACE lowers loguru's global min_level; ours still gate."""
+    configure_logging(log_dir=tmp_path / "logs", script_name="external", console_level="ERROR", file_level="ERROR")
+    stream = io.StringIO()
+    logger.add(stream, level="TRACE", format="{message}", filter=lambda r: True)
+
+    _emit("pkg.a", "DEBUG", "seen-by-the-external-sink-only")
+    shutdown_logging()
+
+    assert "seen-by-the-external-sink-only" in stream.getvalue()
+    assert "seen-by-the-external-sink-only" not in (tmp_path / "logs" / "external.log").read_text()
 
 
 def test_module_levels_absent_is_no_op(tmp_path: Path) -> None:
