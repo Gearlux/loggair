@@ -8,6 +8,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Call tracing — `@track` and `@spy`.** Two decorators that log when a
+  function is entered and left; `@spy` also logs the arguments it was called
+  with. Both accept `level=` and `timing=`, `@spy` additionally `cap=` (bound a
+  long rendering) and `multiline=`. Applied to a class, they trace the methods
+  that class defines itself — static- and classmethods included, inherited
+  methods, private names, other dunders and properties excluded, the bound
+  `self`/`cls` dropped from the parameters, and the class object modified in
+  place so registration, `isinstance` and pickling are unaffected. Decorating an
+  `async def` or generator function raises `TypeError` with the offending
+  `file:line`, because a synchronous wrapper would time only the call that
+  creates the coroutine/generator. Values render with their full `repr`;
+  where Confluid is installed, objects it marks as configurable — and lists or
+  dicts containing them, which is how most real slots are shaped — render as their
+  configuration document instead, with anything Confluid cannot describe replaced
+  by its `repr` first so the dumper's own warning never reaches the log. Confluid
+  stays entirely optional.
+  Each trace line locates the **decorated function** (`name`/`function`/`line`/`file`
+  together, read through `inspect.unwrap` so a decorator underneath cannot supply a
+  line number from its own file) and names the **caller** separately in a
+  `[from module:function:line]` suffix on the entry line.
+  `inherited=` extends class decoration to base classes — `True` for the whole MRO
+  except `object`, or a base class as an inclusive MRO boundary. It is bounded on
+  purpose: a real trainer class defines one traceable method and inherits 167, of
+  which 136 belong to `pytorch_lightning` and `torch.nn`. Wrappers are always
+  installed on the decorated class, never on the base, so decorating one subclass
+  cannot trace its siblings.
+- **`TRAIL` log level (severity 7).** Registered when `loggair` is imported, so
+  a config file may carry `file_level: TRAIL` without importing anything extra.
+  Sits between `TRACE` (5) and `DEBUG` (10), because call tracing is noisier than
+  tracing; a sink at `TRACE` therefore shows call tracing too. Composes with the
+  whole existing surface — `console_level`, `LOGGAIR_FILE_LEVEL`,
+  `module_levels` — unchanged.
+- **`loggair.core.effective_level_no(name=None)`** — the lowest level number
+  that can still reach a sink for a given logger, so callers can skip building a
+  record that would be discarded. More precise than loguru's own check, which is
+  per-*sink* where this is per-*logger*: a `module_levels` rule promoting one
+  logger lowers the whole sink's floor, so records from every other logger clear
+  it and are built in full before the filter drops them (measured: 3.4 µs).
+  `logger.opt(lazy=True)` does not help — loguru evaluates lazy arguments after
+  the level check the record already passed. The decorators gate on it, which
+  keeps a switched-off `@track` at 0.084 µs per call instead of 0.687 µs.
 - **CLI diagnostic** — `python -m loggair` (`--json` for machine output)
   prints the package version, the detected distributed rank and which
   environment source decided it, which config files were found, the merged
@@ -25,7 +66,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `shadowed_path_ignored` JSON field); exit 2 only when no installation is
   reachable at all.
 
+### Changed
+- **Sink level floors are computed instead of pinned open, making every disabled
+  log call ~32× cheaper.** Both sinks were added with a hardcoded
+  `level="TRACE"`, which pinned loguru's `core.min_level` to 5 so its one cheap
+  early-out never fired: every below-threshold record was fully built — frame
+  inspection, timestamp, record dict, argument formatting — and only then
+  discarded by the per-sink filter. Each sink now takes a floor of
+  `min(its global level, every module_levels override for that sink)`, which by
+  construction cannot exclude a record the filter would have accepted. Measured
+  on a process configured at `INFO`: a dropped `logger.debug()` goes from
+  **3.4 µs to 0.10 µs**. Promotion via `module_levels` is unaffected, including
+  `workers_only` promotions in forked children, which inherit the parent's
+  handler objects and therefore its floor. One consequence worth knowing: levels
+  below `TRACE` are now reachable, where before they were silently dropped.
+
 ### Fixed
+- **An invalid log level is now reported against the setting it came from.**
+  Every level-resolution error carried a hardcoded `module_levels:` prefix
+  whatever the caller was, so a typo in `file_level` reported
+  `module_levels: invalid level 'X' for file_level` and sent the reader to the
+  wrong block of their configuration. The message now names only the setting:
+  `invalid level 'X' for file_level`, and rule-scoped errors keep their full
+  path (`invalid level 'X' for module_levels['pkg.a'].console`).
 - **Retention purge no longer crashes when another process purges the same
   stem concurrently.** In a shared log directory, an archive could vanish
   between the directory listing and the `stat()`/`unlink()` inside
