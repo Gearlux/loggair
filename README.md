@@ -861,6 +861,29 @@ Confluid is entirely optional — Loggair does not depend on it, imports it only
 when a spied value carries its marker, and falls back to `repr` whenever it is
 absent.
 
+##### Older Confluid renders as a block, not a memory address
+
+The single-line form is produced by re-reading Confluid's document as YAML.
+Confluid emitted `!class:X()` *tags* until 2026-08-11 — a form `yaml.safe_load`
+refuses — and the plain-YAML dump arrived in 0.3.0, so every release up to v0.2.0
+produces a document that cannot be re-read.
+
+Loggair copes rather than pinning a floor it has no right to enforce: it probes the
+round trip once, and where it fails renders the **indented block** instead. The
+class name and every value survive; only the single line is lost. It says so once
+per process:
+
+```
+WARNING | loggair: this confluid's dump() emits a document yaml.safe_load refuses
+          (installed: 0.2.0; plain-YAML dumps arrived in 0.3.0), so @spy is rendering
+          configuration as an indented block instead of one line. Pass multiline=True
+          to choose the block form explicitly.
+```
+
+The check is of the *behaviour*, not the version number — a fork, a backport or a
+git install can carry the fix while its metadata says otherwise, so the version is
+reported rather than consulted.
+
 #### Decorating a class
 
 Applied to a class, both decorators trace the methods that class defines itself:
@@ -906,16 +929,47 @@ traceable method and inherited **167** — 136 of them from `pytorch_lightning` 
 So inherited tracing is opt-in and bounded by `inherited=`:
 
 ```python
-@spy                                  # own methods only — the default
-@spy(inherited=LightningRunnable)     # own + every base up to and including that one
-@spy(inherited=True)                  # own + the entire MRO except `object`
+@spy                             # own methods only — the default
+@spy(inherited="package")        # + bases from your own top-level package
+@spy(inherited="source")         # + every base whose source you have
+@spy(inherited=True)             # + installed code: the whole MRO except `object`
 ```
 
-A class names an **inclusive boundary** in the MRO: everything from the decorated
-class down to that base is traced, and everything past it is left alone. That is
-usually what you want, because your own base classes sit at the top of the MRO and
-the framework's sit below them. Naming a class that is not a base raises, listing
-the bases that are.
+Measured on that trainer, the four scopes select very differently:
+
+| `inherited=` | methods | reaches |
+| --- | --- | --- |
+| `False` / `"own"` | 1 | the class itself |
+| `"package"` | 6 | its own project |
+| `"source"` | 32 | + the other projects checked out beside it |
+| `True` / `"all"` | 168 | + `pytorch_lightning`, `lightning_fabric`, `torch.nn` |
+
+**`"source"` is the one you usually want.** A base counts as source when the module
+defining it is not owned by the interpreter — not under `site-packages`, the
+standard library, or the interpreter prefix. So your own code and anything you have
+checked out and installed editable is traced, while installed packages are not.
+Classes with no file at all — builtins, C extensions — are never source, because
+there is nothing to read.
+
+It is a **filter over the whole MRO**, not a walk that stops at the first installed
+base, and that distinction is load-bearing: a real trainer's linearization puts the
+standard library's `ABC` *between* two of its own classes, so stopping there would
+silently drop everything below it.
+
+Going deeper is a deliberate choice rather than an accident — `inherited=True`
+reaches installed code, including `nn.Module.forward` on every batch.
+
+For exact control, two other forms:
+
+```python
+@spy(inherited=LightningRunnable)          # an inclusive MRO boundary
+@spy(inherited=lambda base: ...)           # any predicate over base classes
+```
+
+A class names an **inclusive boundary**: everything from the decorated class down
+to that base is traced, and everything past it is left alone. Naming a class that
+is not a base raises, listing the bases that are. A predicate is the escape hatch
+for a layout the source/installed split judges wrongly.
 
 On the same trainer, `inherited=LightningRunnable` turned 2 trace records per run
 into 176, covering `fit`, `training_step`, `validation_step`, the epoch hooks and
@@ -924,19 +978,48 @@ untouched. A base method is traced under the class that defines it, so you can s
 which layer you are in:
 
 ```
-TRAIL | myapp:run:85 | → Job.run(steps=3) [from myapp:main:111]
-TRAIL | myapp:warmup:72 | → Engine.warmup(seconds=1) [from myapp:run:86]
-TRAIL | myapp:warmup:72 | ← Engine.warmup (0.0 ms)
-TRAIL | myapp:run:85 | ← Job.run (0.0 ms)
+TRAIL | myapp:run:91 | → Job.run(steps=3) [from myapp:main:118]
+TRAIL | myapp:warmup:73 | → Engine.warmup(seconds=1) [from myapp:run:92]
+TRAIL | myapp:warmup:73 | ← Engine.warmup (0.0 ms)
+TRAIL | myapp:run:91 | ← Job.run (0.0 ms)
 ```
 
-`inherited=True` is the blunt instrument. It is there when you want it, but on any
-framework subclass it will trace far more than you meant.
+That is `@spy(inherited="source")` on a class inheriting from both `Engine` (defined
+alongside it) and `json.JSONEncoder` (installed). `Job.run` calls `self.encode({})`
+as well, and no line appears for it — the scope reached one base and not the other.
+`examples/track_demo.py` runs exactly this.
 
 Wrappers are always installed on the **decorated class**, shadowing the inherited
 method. The base class is never modified, so decorating one subclass does not trace
 its siblings — or, for a `torch.nn.Module` base, every model in the process. A name
 the class defines itself always wins over the inherited version.
+
+##### Tracing does not make a class look like it overrode something
+
+Libraries ask "did the user implement this?" in two ways, and a naively installed
+wrapper answers one of them wrongly. PyTorch uses raw identity:
+
+```python
+# torch/nn/modules/module.py
+if getattr(self.__class__, "get_extra_state", Module.get_extra_state) is not Module.get_extra_state:
+    destination[extra_state_key] = self.get_extra_state()
+```
+
+A wrapper on that name makes torch conclude the model implements `get_extra_state`,
+call it, and hit the base's "should never be called" error — `state_dict()` dies at
+the first checkpoint save, from nothing but switching tracing on.
+
+So traced methods are installed as a descriptor that hands the **original** to
+class-level lookups and the **wrapper** to instances. The identity check sees
+exactly what it would have seen undecorated, `self.method()` is still traced, and a
+genuine override still reads as one. `functools.wraps` is preserved, so the other
+style — `__code__` comparison that unwraps `__wrapped__`, as
+`lightning_utilities`' `is_overridden` does — keeps answering correctly too.
+
+The cost: a class-level call, `Cls.method(obj)`, runs untraced. That is deliberate —
+a missing trace line is an inconvenience, a broken `state_dict()` is a lost training
+run. Static methods keep the plain wrapper, since for them class access *is* the
+normal call form.
 
 #### What cannot be traced
 
@@ -954,7 +1037,7 @@ generator does per item, instead.
 | `timing` | `True` | Append the elapsed wall time to the exit line. |
 | `cap` | `None` | `@spy` only — truncate any rendered value past this many characters. |
 | `multiline` | `False` | `@spy` only — render configuration documents as a YAML block. |
-| `inherited` | `False` | Classes only — `True` for the whole MRO, or a base class as an inclusive boundary. |
+| `inherited` | `False` | Classes only — `"own"` / `"package"` / `"source"` / `"all"`, a base class as an inclusive boundary, or a predicate. |
 
 #### Gating your own expensive logging
 

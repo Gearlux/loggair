@@ -7,6 +7,7 @@ dependency); without it, spied values fall back to their repr.
     python examples/track_demo.py
 """
 
+import json
 import tempfile
 
 import loggair
@@ -67,23 +68,29 @@ class Model:
 
 
 class Engine:
-    """A base class. Its methods are traced only when a subclass asks for them."""
+    """A base class of YOUR OWN — this file, so `inherited="source"` reaches it."""
 
     def warmup(self, seconds: int = 1) -> None:
         return None
 
 
-@spy(inherited=Engine)
-class Job(Engine):
-    """`inherited=` extends tracing to base classes, bounded by an MRO boundary.
+@spy(inherited="source")
+class Job(Engine, json.JSONEncoder):
+    """`inherited=` extends tracing to base classes, bounded by where the code lives.
 
-    Without it a thin subclass traces almost nothing — its work lives in the base.
-    With `inherited=True` on a framework subclass it traces far too much, which is
-    why the bound is a class rather than a flag.
+    Without it a thin subclass traces almost nothing — its work lives in its bases.
+    `"source"` reaches `Engine` (defined here) but not `json.JSONEncoder` (installed
+    with the interpreter), which is the distinction that matters on a real framework
+    subclass: one such trainer defines 1 traceable method and inherits 167, of which
+    136 belong to installed packages.
+
+    `inherited=True` would reach `JSONEncoder.encode` too; a base class names an
+    inclusive MRO boundary; a callable is a predicate over bases.
     """
 
     def run(self, steps: int = 2) -> int:
         self.warmup()
+        self.encode({})  # JSONEncoder's own method — installed, so NOT traced
         return steps
 
 
@@ -107,7 +114,7 @@ def main() -> None:
         pipeline.size  # noqa: B018 - demonstrates that a property stays untraced
         Pipeline.describe("streaming")
 
-        # `warmup` is defined by Engine, and traced because Job asked for it.
+        # `warmup` is Engine's and IS traced; `encode` is JSONEncoder's and is not.
         Job().run(steps=3)
 
         # Switched off, a decorated call costs ~0.08 us: the decorators check

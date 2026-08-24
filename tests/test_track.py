@@ -1,8 +1,13 @@
 """Tests for the @track / @spy call decorators and the TRAIL level."""
 
 import functools
+import importlib
+import inspect
+import json
 import os
+import pickle
 import re
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +19,10 @@ from loguru import logger
 from loggair.core import configure_logging, effective_level_no, get_logger, reconfigure
 from loggair.null_logger import NullLogger
 from loggair.track import TRAIL, TRAIL_NO, spy, track
+
+# `loggair.track` names the FUNCTION on the package (re-exported by __init__), which
+# shadows the submodule attribute — so the module has to be fetched by name.
+track_module = importlib.import_module("loggair.track")
 
 confluid = pytest.importorskip("confluid", reason="confluid is not a loggair dependency (it depends ON loggair)")
 
@@ -48,6 +57,18 @@ def _lines(log_file: Path) -> list:
     MESSAGE readable. The suffix itself is asserted by the caller-specific tests.
     """
     return [re.sub(r" \[from [^\]]+\]$", "", ln) for ln in _raw_lines(log_file)]
+
+
+def _make_leaf() -> type:
+    """A fresh subclass of :class:`_Interleaved` per test.
+
+    Decoration mutates a class in place, so tests must never share one.
+    """
+
+    class Leaf(_Interleaved):
+        pass
+
+    return Leaf
 
 
 class Boom:
@@ -483,6 +504,142 @@ def test_cap_leaves_a_short_rendering_untouched(tmp_path: Path) -> None:
     assert _lines(log_file)[0] == "→ f(value='short')"
 
 
+# --- an older Confluid, whose dump YAML cannot re-read -----------------------
+#
+# Confluid emitted `!class:X()` scalar TAGS until 2026-08-11; the plain
+# `_target_:` mapping arrived in the unreleased 0.3.0 line, so every RELEASE up to
+# and including v0.2.0 produces a document `yaml.safe_load` refuses. loggair
+# declares no confluid dependency, so it cannot pin a floor — it has to cope.
+
+_OLD_STYLE_DOCUMENT = "!class:ResNet()\nlayers: 50\npretrained: true\n"
+
+#: Distinctive to loggair's OWN warning — confluid's registry emits unrelated ones,
+#: and matching on the observation rather than the phrasing survives a reword.
+_FLOW_WARNING = "yaml.safe_load refuses"
+
+
+def _pretend_confluid_is_old(monkeypatch: Any) -> None:
+    """Make `confluid.dump` return what v0.2.0 returned, and re-arm the probe."""
+    monkeypatch.setattr(confluid, "dump", lambda *a, **k: _OLD_STYLE_DOCUMENT)
+    monkeypatch.setattr(track_module, "_FLOW_SUPPORTED", None)
+
+
+def test_an_old_confluid_still_renders_the_document_not_a_repr(tmp_path: Path, monkeypatch: Any) -> None:
+    """The degradation must cost the LINE, never the information.
+
+    Falling back to `repr` here logs a memory address — the exact thing the
+    Confluid integration exists to replace.
+    """
+    log_file = _configure(tmp_path)
+    _pretend_confluid_is_old(monkeypatch)
+
+    @confluid.configurable
+    class ResNet:
+        def __init__(self, layers: int = 50) -> None:
+            self.layers = layers
+
+    @spy
+    def fit(model: Any) -> None:
+        return None
+
+    fit(ResNet())
+    text = log_file.read_text()
+    assert "!class:ResNet()" in text
+    assert "layers: 50" in text
+    assert "object at 0x" not in text  # never a repr
+
+
+def test_an_old_confluid_warns_once_naming_the_version_and_the_floor(tmp_path: Path, monkeypatch: Any) -> None:
+    log_file = _configure(tmp_path)
+    _pretend_confluid_is_old(monkeypatch)
+
+    @confluid.configurable
+    class WarnOnceNet:
+        def __init__(self, a: int = 1) -> None:
+            self.a = a
+
+    @spy
+    def fit(model: Any) -> None:
+        return None
+
+    fit(WarnOnceNet())
+    fit(WarnOnceNet())
+    fit(WarnOnceNet())
+
+    warnings = [ln for ln in log_file.read_text().splitlines() if _FLOW_WARNING in ln]
+    assert len(warnings) == 1, warnings  # once per process, not per call
+    assert version("confluid") in warnings[0]
+    assert track_module.CONFLUID_FLOW_FLOOR in warnings[0]
+    assert "multiline" in warnings[0]  # names the way to opt into the block form
+
+
+def test_a_working_confluid_neither_warns_nor_degrades(tmp_path: Path, monkeypatch: Any) -> None:
+    """The installed Confluid round-trips, so nothing should be said about it."""
+    log_file = _configure(tmp_path)
+    monkeypatch.setattr(track_module, "_FLOW_SUPPORTED", None)
+
+    @confluid.configurable
+    class Fine:
+        def __init__(self, a: int = 1) -> None:
+            self.a = a
+
+    @spy
+    def fit(model: Any) -> None:
+        return None
+
+    fit(Fine())
+    assert _lines(log_file)[0] == "→ fit(model={_target_: Fine, a: 1})"
+    assert not [ln for ln in log_file.read_text().splitlines() if _FLOW_WARNING in ln]
+
+
+def test_the_capability_probe_is_cached(tmp_path: Path, monkeypatch: Any) -> None:
+    """Once the round trip is known to fail, it must not be retried per call."""
+    _configure(tmp_path)
+    _pretend_confluid_is_old(monkeypatch)
+
+    attempts = {"n": 0}
+    real_safe_load = track_module.yaml.safe_load
+
+    def counting_safe_load(document: str) -> Any:
+        attempts["n"] += 1
+        return real_safe_load(document)
+
+    monkeypatch.setattr(track_module.yaml, "safe_load", counting_safe_load)
+
+    @confluid.configurable
+    class Cached:
+        def __init__(self, a: int = 1) -> None:
+            self.a = a
+
+    @spy
+    def fit(model: Any) -> None:
+        return None
+
+    for _ in range(5):
+        fit(Cached())
+    assert attempts["n"] == 1
+
+
+def test_multiline_is_unaffected_by_an_old_confluid(tmp_path: Path, monkeypatch: Any) -> None:
+    """It never round-trips, so it never had the problem."""
+    log_file = _configure(tmp_path)
+    _pretend_confluid_is_old(monkeypatch)
+
+    @confluid.configurable
+    class Block:
+        def __init__(self, a: int = 1) -> None:
+            self.a = a
+
+    @spy(multiline=True)
+    def fit(model: Any) -> None:
+        return None
+
+    fit(Block())
+    text = log_file.read_text()
+    assert "!class:ResNet()" in text
+    assert not [ln for ln in text.splitlines() if _FLOW_WARNING in ln]
+
+
 def test_spy_falls_back_to_repr_when_confluid_is_unavailable(tmp_path: Path, monkeypatch: Any) -> None:
     # loggair is published standalone; confluid must never be a hard dependency.
     monkeypatch.setitem(__import__("sys").modules, "confluid", None)
@@ -910,6 +1067,265 @@ def test_object_is_never_wrapped_by_inherited_true(tmp_path: Path) -> None:
 
     assert "__init__" not in vars(Bare)
     assert "__eq__" not in vars(Bare)
+
+
+# --- inherited= scopes: source vs installed ----------------------------------
+#
+# The real reason these exist: a leaf class's useful bases live in YOUR source
+# tree, while its framework bases are installed. On a real trainer the split is
+# 32 traceable methods you want against 136 from pytorch_lightning and torch.nn.
+# `json.JSONEncoder` stands in for an installed base here — stdlib, with public
+# methods, present wherever the tests run.
+
+
+class _SourceFirst:
+    def first(self) -> str:
+        return "first"
+
+
+class _SourceLast:
+    def last(self) -> str:
+        return "last"
+
+
+class _Interleaved(_SourceFirst, json.JSONEncoder, _SourceLast):
+    """MRO: _Interleaved, _SourceFirst, JSONEncoder, _SourceLast — an INSTALLED
+    class sitting between two source ones, which is the shape that separates a
+    filter from a stop-at-the-first-installed-base walk."""
+
+
+def test_the_installed_base_really_is_between_the_source_ones() -> None:
+    """Guard the fixture itself — the test below is meaningless if the MRO shifts."""
+    names = [c.__name__ for c in _Interleaved.__mro__]
+    assert names.index("_SourceFirst") < names.index("JSONEncoder") < names.index("_SourceLast")
+
+
+def test_source_scope_traces_source_bases_and_skips_installed_ones(tmp_path: Path) -> None:
+    log_file = _configure(tmp_path)
+
+    traced = track(inherited="source")(_make_leaf())
+    obj = traced()
+    obj.first()
+    obj.last()
+    obj.encode({})  # JSONEncoder's own method — installed, must stay untraced
+
+    msgs = _lines(log_file)
+    assert "→ _SourceFirst.first()" in msgs
+    assert "→ _SourceLast.last()" in msgs
+    assert not [m for m in msgs if "encode" in m or "iterencode" in m or "default" in m]
+
+
+def test_source_scope_is_a_filter_not_a_stop_at_the_first_installed_base(tmp_path: Path) -> None:
+    """`_SourceLast` sits AFTER an installed class in the MRO and must still be traced.
+
+    Walking until the first installed base would truncate at `JSONEncoder` and
+    silently drop everything below it.
+    """
+    log_file = _configure(tmp_path)
+
+    traced = track(inherited="source")(_make_leaf())
+    traced().last()
+    assert "→ _SourceLast.last()" in _lines(log_file)
+
+
+def test_all_scope_reaches_the_installed_base(tmp_path: Path) -> None:
+    """The other half of the ask: you can choose to go deeper into installed code."""
+    log_file = _configure(tmp_path)
+
+    traced = track(inherited="all")(_make_leaf())
+    traced().encode({})
+    assert [m for m in _lines(log_file) if "JSONEncoder.encode" in m]
+
+
+def test_package_scope_keeps_only_the_decorated_classes_own_package(tmp_path: Path) -> None:
+    log_file = _configure(tmp_path)
+
+    @track(inherited="package")
+    class Leaf(_SourceFirst, json.JSONEncoder):
+        pass
+
+    obj = Leaf()
+    obj.first()
+    obj.encode({})
+    msgs = _lines(log_file)
+    assert "→ _SourceFirst.first()" in msgs  # same module, so same top-level package
+    assert not [m for m in msgs if "encode" in m]
+
+
+def test_own_is_the_same_as_false(tmp_path: Path) -> None:
+    log_file = _configure(tmp_path)
+
+    @track(inherited="own")
+    class Leaf(_SourceFirst):
+        def mine(self) -> None:
+            return None
+
+    obj = Leaf()
+    obj.mine()
+    obj.first()
+    msgs = _lines(log_file)
+    assert "→ Leaf.mine()" in msgs
+    assert not [m for m in msgs if "first" in m]
+
+
+def test_a_callable_predicate_selects_the_bases(tmp_path: Path) -> None:
+    log_file = _configure(tmp_path)
+
+    traced = track(inherited=lambda base: base.__name__ == "_SourceLast")(_make_leaf())
+    obj = traced()
+    obj.first()
+    obj.last()
+    msgs = _lines(log_file)
+    assert "→ _SourceLast.last()" in msgs
+    assert not [m for m in msgs if "first" in m]
+
+
+def test_an_unknown_scope_name_lists_the_valid_ones() -> None:
+    with pytest.raises(ValueError) as exc:
+        # Not in the Literal on purpose — the runtime message is what is under test.
+        track(inherited="everything")(_make_leaf())  # type: ignore[call-overload]
+    message = str(exc.value)
+    assert "everything" in message
+    for scope in ("own", "package", "source", "all"):
+        assert scope in message
+
+
+def test_a_meaningless_inherited_value_is_refused() -> None:
+    with pytest.raises(TypeError) as exc:
+        track(inherited=3)(_make_leaf())  # type: ignore[call-overload]
+    assert "inherited" in str(exc.value)
+
+
+def test_has_source_is_true_for_this_test_module_and_false_for_the_stdlib() -> None:
+    from loggair.track import _has_source
+
+    assert _has_source(_SourceFirst) is True
+    assert _has_source(json.JSONEncoder) is False
+
+
+def test_has_source_is_false_without_a_file() -> None:
+    """Builtins and C extensions expose no `__file__` — you cannot read their source."""
+    from loggair.track import _has_source
+
+    class Fake:
+        pass
+
+    Fake.__module__ = "sys"  # a real module with no __file__
+    assert _has_source(Fake) is False
+
+
+# --- wrapping must not read as an override ----------------------------------
+#
+# Libraries detect "did the user override this?" two ways. The `__code__` style
+# (lightning_utilities' is_overridden) unwraps `functools.wraps` and is already
+# satisfied. The RAW IDENTITY style is not: torch asks
+# `getattr(self.__class__, "get_extra_state", Module.get_extra_state) is not
+# Module.get_extra_state` (torch/nn/modules/module.py:2166, and again at 2510 for
+# set_extra_state), concludes the method was implemented, calls it, and the base
+# raises — a crash at the first checkpoint save. Installing the wrapper as a
+# descriptor that hands the ORIGINAL to class-level lookups keeps both styles right.
+
+
+class _IdentityChecked:
+    """Mimics the raw-identity probe, so this holds without torch installed."""
+
+    def probe(self) -> str:
+        return "base"
+
+    def looks_overridden(self) -> bool:
+        return getattr(type(self), "probe", _IdentityChecked.probe) is not _IdentityChecked.probe
+
+
+@track(inherited=True)
+class _PicklableLeaf(_IdentityChecked):
+    """Module-level and traced, so pickling it exercises the descriptor by reference."""
+
+
+def test_wrapping_an_inherited_method_does_not_read_as_an_override(tmp_path: Path) -> None:
+    _configure(tmp_path)
+
+    @track(inherited=True)
+    class Leaf(_IdentityChecked):
+        pass
+
+    assert Leaf().looks_overridden() is False
+    assert Leaf.probe is _IdentityChecked.probe
+
+
+def test_a_genuine_override_still_reads_as_one(tmp_path: Path) -> None:
+    """The check must keep ANSWERING correctly, not merely stop saying yes."""
+    _configure(tmp_path)
+
+    @track(inherited=True)
+    class Leaf(_IdentityChecked):
+        def probe(self) -> str:
+            return "leaf"
+
+    assert Leaf().looks_overridden() is True
+
+
+def test_the_instance_call_is_still_traced(tmp_path: Path) -> None:
+    """Class-level access hands back the original; instances must still be traced."""
+    log_file = _configure(tmp_path)
+
+    @track(inherited=True)
+    class Leaf(_IdentityChecked):
+        pass
+
+    assert Leaf().probe() == "base"
+    assert "→ _IdentityChecked.probe()" in _lines(log_file)
+
+
+def test_class_level_calls_run_untraced(tmp_path: Path) -> None:
+    """The documented cost of preserving identity — pinned so it is a decision, not a surprise."""
+    log_file = _configure(tmp_path)
+
+    @track(inherited=True)
+    class Leaf(_IdentityChecked):
+        pass
+
+    assert Leaf.probe(Leaf()) == "base"
+    assert not [m for m in _lines(log_file) if "probe" in m]
+
+
+def test_super_and_introspection_survive_the_descriptor(tmp_path: Path) -> None:
+    _configure(tmp_path)
+
+    @track(inherited=True)
+    class Leaf(_IdentityChecked):
+        def via_super(self) -> str:
+            return super().probe()
+
+    obj = Leaf()
+    assert obj.via_super() == "base"
+    # bound vs bound: `obj.probe` has `self` already applied, as an untraced one does
+    assert inspect.signature(obj.probe) == inspect.signature(_IdentityChecked().probe)
+    assert getattr(obj.probe, "__wrapped__").__name__ == "probe"
+
+
+def test_a_traced_class_still_pickles(tmp_path: Path) -> None:
+    """Spawn workers pickle model objects; a descriptor must not stand in the way.
+
+    Module-level because a class defined inside a test is not picklable by reference
+    at all — that would prove nothing about the descriptor.
+    """
+    _configure(tmp_path)
+    assert pickle.loads(pickle.dumps(_PicklableLeaf())).probe() == "base"
+
+
+def test_torch_state_dict_survives_inherited_tracing(tmp_path: Path) -> None:
+    """The reported crash, against the real library when it is installed."""
+    torch_nn = pytest.importorskip("torch.nn", reason="torch is not a loggair dependency")
+    _configure(tmp_path)
+
+    # `torch_nn` comes from importlib at runtime, so mypy cannot resolve the base.
+    class Net(torch_nn.Module):  # type: ignore[name-defined]
+        def __init__(self) -> None:
+            super().__init__()
+            self.lin = torch_nn.Linear(2, 2)
+
+    traced = track(inherited=True)(type("TracedNet", (Net,), {}))
+    assert list(traced().state_dict().keys()) == ["lin.weight", "lin.bias"]
 
 
 def test_class_decoration_accepts_keyword_options(tmp_path: Path) -> None:
