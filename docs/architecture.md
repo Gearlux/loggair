@@ -393,11 +393,31 @@ quietly elides the one argument you were chasing has failed at its only job.
 → train(model=<myapp.ResNet object at 0x10883dd00>, epochs=7)               # without it
 ```
 
+### The format is not stable, so the capability is probed rather than the version
+
+*added 2026-08-22*
+
+The single-line form re-reads the emitted document as YAML. That only works because
+Confluid emits plain YAML — which it has not always done: `!class:X()` scalar tags
+stood until 2026-08-11, and the plain `_target_:` mapping arrived in the unreleased
+0.3.0 line. Every release through v0.2.0 therefore produces a document
+`yaml.safe_load` refuses, and since Loggair declares no Confluid dependency, it has
+no floor it could enforce and no say in which version a user has.
+
+Two things follow. The fallback is the **block** document rather than `repr`: the
+degradation costs the line, never the class name or the values, so the feature
+still does its job on an old Confluid. And the decision is made by *attempting the
+round trip once and remembering*, not by comparing version strings — a fork, a
+backport or a git install can carry the fix while its metadata says otherwise, and
+a check that contradicts `pip show` is worse than none. The version is reported in
+the warning, which fires once per process and states what was observed rather than
+ordering an upgrade that may not apply.
+
 ### What you may change
 
 Which marker selects the rich path, and the flow/block rendering. What must not
 change is the laziness of the import and the fallback: a hard dependency here is
-a dependency cycle.
+a dependency cycle. Nor may the version become the decision — see above.
 
 ---
 
@@ -444,15 +464,65 @@ inherits **167**, distributed like this:
 | `torch.nn.Module` | 44 |
 
 Tracing the bottom two groups means a log line on `nn.Module.forward` for every
-batch. So `inherited=` takes `False` (the default), a base class as an **inclusive
-MRO boundary**, or `True` for everything but `object`. The boundary form works
-because a project's own bases sit at the top of the MRO and the framework's below
-them — exactly the split the table shows.
+batch. The split that matters is therefore not *how far up the MRO* but *whose code
+it is* — and the table shows those coincide: the useful bases are the ones checked
+out beside the decorated class, the rest are installed packages.
+
+So the bound is expressed as a scope over the whole MRO:
+
+| `inherited=` | selects | on that trainer |
+| --- | --- | --- |
+| `False` / `"own"` | nothing inherited | 1 |
+| `"package"` | bases sharing the decorated class's top-level package | 6 |
+| `"source"` | bases whose module is not interpreter-owned | 32 |
+| `True` / `"all"` | every base except `object` | 168 |
+
+plus a base class as an **inclusive MRO boundary** and a callable as a predicate,
+for cases the named scopes judge wrongly.
+
+`"source"` asks the only question that survives a machine change: is there a file
+to read? A module is interpreter-owned when its `__file__` sits under `sysconfig`'s
+`purelib` / `platlib` / `stdlib` / `platstdlib`, `sys.prefix` or `sys.base_prefix`;
+no `__file__` at all — builtins, C extensions — is never source. Those roots come
+from `sysconfig` rather than from matching path shapes, because the common layout
+puts the venv *inside* the source tree: `~/project/.venv/lib/python3.13/site-packages`
+is nested under the very root it must be distinguished from, and only the
+interpreter's own answer gets that right. Verified across editable checkouts,
+site-packages installs, the stdlib and builtins.
+
+**It filters the entire MRO rather than stopping at the first installed base**, and
+that is the one subtle decision here. Linearization interleaves: this trainer's MRO
+runs `ProgressReporting` (source), `ABC` (stdlib), `TorchRunner` (source),
+`LightningModule` (installed). A walk that halts at the first installed class stops
+at `ABC` and never reaches `TorchRunner`. Measured on four real trainers the two
+readings give identical counts today, because the class after `ABC` happens to have
+no traceable methods — so this is a structural guard, not a bug being fixed. It
+costs nothing now and is invisible to catch later.
 
 Wrappers are installed on the **decorated class**, shadowing the inherited name,
 never on the base. Writing to the base would trace every subclass in the process;
 for an `nn.Module` base that is every model. A name the class defines itself always
 wins, because the override is what actually runs.
+
+They are installed as a **descriptor**, not as a bare function, and that is not a
+detail. Libraries decide "did the user implement this?" two ways. The `__code__`
+style unwraps `functools.wraps` and was already satisfied. The raw-identity style is
+not:
+
+```python
+# torch/nn/modules/module.py:2166 — and again at 2510 for set_extra_state
+if getattr(self.__class__, "get_extra_state", Module.get_extra_state) is not Module.get_extra_state:
+    destination[extra_state_key] = self.get_extra_state()
+```
+
+A wrapper installed under that name makes torch conclude the model implements
+`get_extra_state`, call it, and hit the base's deliberate `RuntimeError` —
+`state_dict()` dies at the first checkpoint save, caused by nothing but switching
+tracing on. So `_TracedMethod.__get__` returns the original when accessed on the
+class and the bound wrapper when accessed on an instance: the identity check sees
+what it would have seen undecorated, instance calls are still traced, and a genuine
+override still reads as one. The trade is that `Cls.method(obj)` runs untraced,
+which is the direction to fail in — a missing trace line against a lost run.
 
 ### Consequences
 
@@ -463,6 +533,12 @@ wins, because the override is what actually runs.
 - A class whose methods are added after decoration will not have them traced.
 - `inherited=` on a plain function raises: a function has no bases, and silently
   accepting the argument would leave the author expecting traces that never come.
+- Tracing depth follows your install layout: `pip install`ing a sibling project
+  non-editably moves it into site-packages, and `"source"` stops reaching it.
+  Defensible — you no longer have the source — but worth knowing.
+- Decorating a class that is itself installed, with `"source"`, traces only its own
+  methods. The alternative reading — "same root as the decorated class" — would
+  trace all of `torch` from a `torch` subclass, which is worse.
 - Measured on that trainer: `inherited=LightningRunnable` took one run from 2 trace
   records to 176, covering `fit`, `training_step`, `validation_step`, the epoch
   hooks and `configure_optimizers`, with Lightning and torch untouched.
@@ -477,6 +553,10 @@ class Pipeline:
     def _prepare(self): ...          # private: not traced
     @property
     def size(self): ...              # property: not traced, getter never fired
+
+
+@spy(inherited="source")             # + every base you have the source for
+class Trainer(LightningRunnable): ...
 ```
 
 ```
