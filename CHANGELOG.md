@@ -23,17 +23,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dicts containing them, which is how most real slots are shaped — render as their
   configuration document instead, with anything Confluid cannot describe replaced
   by its `repr` first so the dumper's own warning never reaches the log. Confluid
-  stays entirely optional.
+  stays entirely optional. Where the installed Confluid emits a document
+  `yaml.safe_load` refuses — the `!class:X()` tags every release up to v0.2.0
+  produces — the indented block is rendered instead of the single line, so the class
+  name and values survive rather than collapsing to a `repr`; a single warning per
+  process names the installed version and where plain-YAML dumps arrived. The probe
+  is of the round trip itself, not of the version number, since a fork or backport
+  can pair old behaviour with new metadata.
   Each trace line locates the **decorated function** (`name`/`function`/`line`/`file`
   together, read through `inspect.unwrap` so a decorator underneath cannot supply a
   line number from its own file) and names the **caller** separately in a
   `[from module:function:line]` suffix on the entry line.
-  `inherited=` extends class decoration to base classes — `True` for the whole MRO
-  except `object`, or a base class as an inclusive MRO boundary. It is bounded on
-  purpose: a real trainer class defines one traceable method and inherits 167, of
-  which 136 belong to `pytorch_lightning` and `torch.nn`. Wrappers are always
-  installed on the decorated class, never on the base, so decorating one subclass
-  cannot trace its siblings.
+  `inherited=` extends class decoration to base classes, bounded by where the code
+  lives rather than by MRO depth: `"own"` (the `False` default), `"package"`,
+  `"source"`, `"all"` (`True`), plus a base class as an inclusive MRO boundary or a
+  callable predicate. Measured on a real trainer that defines one traceable method
+  and inherits 167, the scopes select 1 / 6 / 32 / 168 — the 136 excluded by
+  `"source"` belong to `pytorch_lightning` and `torch.nn`, and would put a trace on
+  `nn.Module.forward` for every batch. A base counts as `"source"` when its module's
+  file is not under `sysconfig`'s interpreter-owned roots, which reads correctly
+  even for the common layout where the venv sits inside the source tree; a class
+  with no file is never source. The scope filters the whole MRO rather than stopping
+  at the first installed base, because linearization interleaves them. Wrappers are
+  always installed on the decorated class, never on the base, so decorating one
+  subclass cannot trace its siblings, and they are installed as a descriptor that
+  returns the original for class-level lookups so tracing never reads as an override.
+  That last point is load-bearing: PyTorch detects an implemented `get_extra_state`
+  by raw identity against `Module.get_extra_state`, so a plainly-installed wrapper
+  made `state_dict()` raise at the first checkpoint save. Instance calls are still
+  traced and `functools.wraps` is preserved, so `__code__`-comparison checks such as
+  `lightning_utilities`' `is_overridden` stay correct; the cost is that a class-level
+  call runs untraced.
 - **`TRAIL` log level (severity 7).** Registered when `loggair` is imported, so
   a config file may carry `file_level: TRAIL` without importing anything extra.
   Sits between `TRACE` (5) and `DEBUG` (10), because call tracing is noisier than
