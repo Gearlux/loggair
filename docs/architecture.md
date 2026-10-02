@@ -571,3 +571,217 @@ dunders and `_private` names are not). The spelling of the `inherited=` bound. W
 you may not change is the in-place mutation without checking what depends on class
 identity, or the rule that wrappers land on the decorated class rather than the
 base.
+
+---
+
+## Rotation: Loggair renames at startup, loguru rotates at runtime, and a live log is never purged
+
+*2026-07-05, extended 2026-08-24*
+
+### Context
+
+Three requirements pull on one log directory.
+
+1. Every run gets a fresh file, so a log maps one-to-one onto an experiment. That is a
+   *startup* event, once per run and not once per process.
+2. A service that never restarts must still bound its file. That is a *runtime* event.
+3. The directory is shared. A centralized `~/logs` holds the live `{name}.log` of every
+   concurrently running script, and several processes of one run write the same file.
+
+Loguru ships runtime rotation (`rotation=`, with `retention=` and `compression=` applied at
+rotation time) but no startup rotation. A rename that races several writers splits their
+streams, because each keeps writing to the inode it already holds.
+
+### Decision
+
+- **Startup rotation is Loggair's own.** `_rotate` renames `{name}.log` to
+  `{name}.{timestamp}.log`, compresses it if asked, and prunes archives. For the shared file
+  only the main process of rank 0 runs it. Loguru's sink-level `compression=` never fires on
+  a rename Loggair made itself, so `_compress_file` does the compression, best-effort: on any
+  failure it warns, removes a partial archive and keeps the original, so a rotated log is
+  never lost.
+- **Runtime rotation is loguru's.** The `rotation` value goes verbatim to `rotation=` on the
+  file sink. Loguru validates it at `add()`, so a bad value fails at configure time and
+  Loggair never parses sizes or times. `retention=` and `compression=` go in the same call,
+  so a process that never restarts still prunes and compresses.
+- **One rotator per file.** On the shared file, runtime rotation is applied only in the main
+  process of rank 0. A spawn-started child that re-adds its own sink keeps its descriptor and
+  keeps writing into the archive (a documented caveat); fork-inherited children write through
+  the enqueue queue and are safe. With `worker_files=True` each process owns its file
+  exclusively, so each rotates its own, at startup (`_rotate(..., force_owner=True)`) and at
+  runtime.
+- **Retention is per stem and counts archives only.** Both purges (`_rotate` and the startup
+  sweep in `configure_logging`) match `_ARCHIVE_RE`: `{stem}.{timestamp}.log` with an optional
+  `.gz`/`.zip`. `_TIMESTAMP_RE` accepts both naming schemes, the startup
+  `YYYY-MM-DD_HH-MM-SS` and loguru's runtime form with a `_ffffff` microseconds suffix. The
+  sweep also prunes stems left by earlier runs under other script names.
+- **A bare `{name}.log` is never a purge candidate.** In a shared directory it may be the
+  live sink of another running process; unlinking it discards that run's output while loguru
+  keeps writing to the unlinked inode.
+- **A purge tolerates candidates vanishing.** Another process may purge the same stem
+  concurrently, so a candidate can disappear between the directory listing and the
+  `stat()`/`unlink()`. No pre-check can close that race, which makes it the sanctioned
+  try/except exception to checking first: skip the vanished file silently, never warn, still
+  enforce `retention` on the survivors.
+
+### Consequences
+
+- A shared directory can hold any mix of startup and runtime archives of one stem, compressed
+  or not, and one `retention` count governs them all.
+- Another script's live log survives any number of this script's startups.
+- Compression has one vocabulary, a closed `Literal["gz", "zip"]`. The validation set, the
+  archive suffix and the purge regex all derive from it, so a new format is one edit.
+- The spawn-child caveat has one fix: `worker_files`.
+
+### Example
+
+```yaml
+log_dir: ~/logs
+rotation: "100 MB"
+retention: 5
+compression: gz
+worker_files: true
+```
+
+After a few days of a DDP run, the log directory holds:
+
+```
+train.log                                   # main process, live
+train.2026-10-01_09-00-02.log.gz            # startup archive: Loggair renamed and compressed it
+train.2026-10-01_14-31-07_381204.log.gz     # runtime archive: loguru, microseconds suffix
+train.rank2.log                             # rank 2's own live file
+other_script.log                            # another script's live sink: never a candidate
+```
+
+### What you may change
+
+The default `retention`, the set of compression formats (edit the `Literal`), and the archive
+naming as long as `_ARCHIVE_RE` still recognises both schemes. Do not pass the sweep a bare
+`{name}.log`, apply runtime rotation to a file several processes share, or reimplement
+loguru's size and time parsing. Pins:
+- `tests/test_forensics.py::test_sweep_never_deletes_other_scripts_live_logs`
+- `tests/test_disable_and_compression.py::test_purge_tolerates_candidate_vanishing_before_stat`
+- `tests/test_core.py::test_runtime_rotation_only_in_main_process`
+- `tests/test_worker_files.py::test_worker_runtime_rotation_of_owned_file`
+
+---
+
+## Runtime control is by signal, never by polling
+
+*2026-07-04*
+
+### Context
+
+A multi-week training job or a long-lived service needs its verbosity changed without a
+restart: raise to `DEBUG` to diagnose an anomaly, or pick up an edited `loggair.yaml`. Three
+mechanisms could do it: a thread that polls the config file, a POSIX signal, or a programmatic
+`reconfigure()` call.
+
+A signal handler is where this goes wrong. Python runs it on the main thread at an arbitrary
+bytecode boundary. Loguru's handler and core locks are plain non-reentrant `threading.Lock`s,
+so a `logger.remove()` or `logger.add()` from a handler that interrupted an in-flight `emit`
+finds the lock held by its own thread and deadlocks.
+
+### Decision
+
+`reload_signal` and `debug_signal` are opt-in settings. Their handlers do one thing: start a
+daemon thread (`_apply_signal_action`) and return, so the work waits for the lock like any
+other thread. The thread is stored on `LoggingState.last_signal_thread`, which tests `join()`
+instead of sleeping. Handlers are installed in the main process and main thread only.
+
+Config-file polling was considered and rejected. A watcher thread in every process breaks the
+zero-overhead principle for a feature most runs never use, and `reload_signal` already covers
+the edit-then-apply workflow.
+
+### Consequences
+
+- A reload re-applies the arguments of the original `configure_logging` call
+  (`LoggingState.last_kwargs`) under any overrides, so it only picks up changes for settings
+  that came from env vars or config files. A setting pinned by an argument is not
+  signal-reloadable.
+- The debug toggle snapshots `last_kwargs` before raising both sinks to `DEBUG` and restores
+  the snapshot when toggled off.
+- `reconfigure()` is the signal-free route to the same reload.
+
+### Example
+
+```yaml
+# loggair.yaml
+reload_signal: SIGUSR1   # re-resolve env + config files, reload the sinks
+debug_signal: SIGUSR2    # toggle DEBUG on both sinks
+```
+
+```
+kill -USR2 <pid>    # DEBUG on
+kill -USR2 <pid>    # DEBUG off, the previous levels restored
+```
+
+```python
+def _handler(signum, frame):
+    t = threading.Thread(target=_apply_signal_action, args=(mode,), daemon=True)
+    LoggingState.last_signal_thread = t   # tests join() it
+    t.start()                             # nothing else: no logger.remove()/add() here
+```
+
+### What you may change
+
+Which signals exist and their names. Do not call into loguru from a handler, and do not add a
+polling watcher without first changing the zero-overhead requirement. Pins:
+- `tests/test_core.py::test_debug_signal_toggles_debug_mode`
+- `tests/test_core.py::test_reload_signal_applies_edited_config`
+- `tests/test_core.py::test_reconfigure_preserves_explicit_args`
+
+---
+
+## The configuration loader is bespoke; a handler-spec loader was not adopted
+
+*2026-07-04*
+
+### Context
+
+Loguru has a small third-party loader, `loguru-config`, that maps a config file directly onto
+`logger.configure()`: the user declares raw sinks. It had a single release in 2023-07, about
+545 lines, and no resolution hierarchy (one file, no env vars, no `pyproject.toml` table, no
+XDG fallback) at the time it was evaluated.
+
+Loggair's keys (`log_dir`, `script_name`, `rotation_on_startup`, `retention`, `compression`,
+`module_levels`, `enqueue`, `serialize`) are not sinks. They are policies that Loggair
+compiles into sinks, filters, rotation and pivot behavior and lazy enqueue.
+
+### Decision
+
+`loggair/config.py` stays: about 50 lines that find four locations (`loggair.yaml` or
+`loggair.yml`, `pyproject.toml` under `[tool.loggair]`, the XDG `config.yaml`) and merge them
+shallowly. `resolve_settings()` then layers function arguments and `LOGGAIR_*` env vars on
+top.
+
+### Consequences
+
+- Raw handler specs would bypass rank-zero filtering, rank tags, `module_levels`, startup
+  rotation and the colorize tri-state entirely.
+- The shallow merge is documented behavior, not a bug: a local `module_levels:` replaces the
+  global one wholesale.
+- There is no second loader to keep in step with loguru's handler schema.
+
+### Example
+
+Measured with `~/.config/loggair/config.yaml` holding `retention: 3` and
+`module_levels: {pkg.a: {file: DEBUG}}`, a local `loggair.yaml` holding
+`module_levels: {pkg.b: {file: DEBUG}}`, and no env vars:
+
+```
+resolve_settings()["retention"]       -> 3                       # from the global file
+resolve_settings()["module_levels"]   -> {'pkg.b': {'file': 'DEBUG'}}   # pkg.a replaced
+```
+
+With `LOGGAIR_RETENTION=7` in the environment, `retention` is `7` and `module_levels` is
+unchanged.
+
+### What you may change
+
+The set of config locations, and the merge if the shallow rule is reconsidered with the user.
+Do not hand sink definitions to a config file, and do not add a second precedence rule to the
+hierarchy. Pins:
+- `tests/test_config.py`
+- `tests/test_core.py::test_configure_env_overrides_file`
+- `tests/test_core.py::test_configure_args_overrides_env`
