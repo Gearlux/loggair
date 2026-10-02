@@ -991,7 +991,11 @@ def get_active_config() -> Dict[str, Any]:
     ``rotation``, ``enqueue`` / ``enqueue_active`` (requested vs.
     lazily-materialized queue), ``colorize`` (resolved tri-state),
     ``serialize``, ``console_format`` / ``file_format``, ``reload_signal`` /
-    ``debug_signal``, ``debug_mode_active``, ``is_main_process``, ``rank``.
+    ``debug_signal``, ``alert_level`` / ``alert_throttle`` / ``alert_urls`` (the URLs
+    privacy-redacted — they carry tokens), ``worker_files``, ``intercept`` /
+    ``intercept_exclude`` / ``capture_warnings``, ``debug_mode_active``,
+    ``experiment_context`` (the live :func:`get_context` values), ``is_main_process``,
+    ``rank``.
 
     Returns a fresh copy — mutating it does not affect Loggair. Reflects the
     state as of the last (re)configure; ``enqueue_active`` in particular may

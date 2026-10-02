@@ -55,12 +55,6 @@ pip install loggair                     # from PyPI
 pip install "loggair[alerts]"           # + webhook/alerting sinks (apprise)
 ```
 
-Latest development version straight from GitHub:
-
-```bash
-pip install git+https://github.com/Gearlux/loggair.git@main
-```
-
 ```python
 import loggair
 print(loggair.__version__)              # installed distribution version
@@ -129,6 +123,16 @@ export LOGGAIR_DIR="/var/log/myapp"
 export LOGGAIR_CONSOLE_LEVEL="ERROR"
 export NO_COLOR=1                 # force plain console output (see §4)
 ```
+
+These variables are read in addition to the ones the sections below introduce:
+
+| Variable | Setting | Meaning |
+|---|---|---|
+| `LOGGAIR_RETENTION` | `retention` | How many timestamped archives to keep per log stem (default `5`; see §9) |
+| `LOGGAIR_ROTATION_ON_STARTUP` | `rotation_on_startup` | Archive the existing log file with a timestamp at startup (default `true`) |
+| `LOGGAIR_ENQUEUE` | `enqueue` | Route records through a multiprocessing queue (default `false`) |
+| `LOGGAIR_EAGER_ENQUEUE` | — | With `enqueue`, create the queue at configure time instead of when the first child process is forked or spawned |
+| `LOGGAIR_SCRIPT_NAME` | `script_name` | The log file stem (default: inferred from the running script); Loggair exports it in the main process so child processes write the same file |
 
 ### 3. Per-logger, Per-sink Level Overrides
 
@@ -477,7 +481,11 @@ print(json.dumps(loggair.get_active_config(), indent=2))
 #   "colorize": null, "serialize": false,
 #   "console_format": "...", "file_format": "...",
 #   "reload_signal": "SIGUSR1", "debug_signal": null,
-#   "debug_mode_active": false, "is_main_process": true, "rank": null
+#   "alert_level": "ERROR", "alert_throttle": 60.0, "alert_urls": [],
+#   "worker_files": false,
+#   "intercept": "full", "intercept_exclude": [], "capture_warnings": true,
+#   "debug_mode_active": false, "experiment_context": {},
+#   "is_main_process": true, "rank": null
 # }
 ```
 
@@ -632,7 +640,7 @@ without configuring anything:
 
 ```console
 $ python -m loggair
-loggair 0.1.0  (loguru 0.7.3, python 3.12.13)
+loggair 0.2.0  (loguru 0.7.3, python 3.12.13)
 process:  MainProcess (pid 64497)
 rank:     3  (from RANK)
 
