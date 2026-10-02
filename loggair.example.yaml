@@ -216,7 +216,7 @@ console_level: "INFO"
 #
 # module_levels:
 #   # Demote a chatty logger to WARNING on the file sink, in workers only:
-#   "waivefront.rfuav.data.archive":
+#   "mypkg.data.archive":
 #     file: WARNING
 #     workers_only: true
 #
