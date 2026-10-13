@@ -80,7 +80,7 @@ retention: 5
 #
 # Loggair registers one level of its own, TRAIL (severity 7), which sits between
 # TRACE (5) and DEBUG (10). It carries the call tracing emitted by the @track and
-# @spy decorators — see README section 19. Because it is ABOVE trace, running at
+# @spy decorators — see docs/tracing.md. Because it is ABOVE trace, running at
 # TRACE shows call tracing too; set a sink to TRAIL to see tracing without the
 # rest of TRACE.
 

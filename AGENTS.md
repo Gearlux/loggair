@@ -1,7 +1,8 @@
 # Loggair Mandates
 
 Rules only. The reasons are in [`docs/architecture.md`](docs/architecture.md) (cited by record
-title) and the code docstrings; usage is in the [README](README.md) (cited as README §N). Root
+title) and the code docstrings; usage is in the [README](README.md) (the quickstart) and the guides
+`docs/configuration.md`, `docs/operations.md` and `docs/tracing.md` (cited by file and heading). Root
 `AGENTS.md` rules are not repeated here.
 
 ## Current state
@@ -17,9 +18,9 @@ sinks and filters, `get_logger`, `effective_level_no`), `rotation.py`, `signals.
 (config-file layers), `null_logger.py`, `track.py` (`@track` / `@spy`, level `TRAIL`) and
 `__main__.py` (the read-only diagnostic: `python -m loggair`, also the `loggair` console script).
 
-Every config key is in `loggair.example.yaml` and README §1-§19. In this workspace
-`~/.config/loggair/config.yaml` sets `log_dir: ~/logs`: debug a local run from `~/logs`, not
-`./logs`.
+Every config key is in `loggair.example.yaml` and the settings table of `docs/configuration.md`. In
+this workspace `~/.config/loggair/config.yaml` sets `log_dir: ~/logs`: debug a local run from
+`~/logs`, not `./logs`.
 
 ## Sinks and processes
 
@@ -201,6 +202,24 @@ Pins (`::name`) are in `tests/test_track.py`.
   - Decorating an `async` or generator function raises `TypeError`; class decoration skips them
     with one `DEBUG` line. `inherited=` on a function raises *(unpinned)*.
     (`::test_decorating_an_async_function_raises_with_a_located_message`)
+
+## Documentation
+
+- The README is the quickstart — install, first run with its measured output, how settings resolve, the
+  common-tasks table, the document index — and stays near 200 lines. Feature guides live in `docs/`:
+  `configuration.md` (how a setting gets its value, the settings table, levels, `module_levels`,
+  coloring, formats, runtime changes, `get_active_config`, the diagnostic), `operations.md` (ranks and
+  processes, worker files, rotation and retention, JSON, experiment context, alerting, interception,
+  teardown, lnav) and `tracing.md` (`@track` / `@spy`). A new setting goes into the settings table of
+  `docs/configuration.md` and into `loggair.example.yaml` in the same change; a new behaviour gets a
+  section in the guide that owns it and, when it is a common task, one row in the README table. Never
+  regrow a feature section in the README. *(unpinned)*
+- README links into `docs/` are ABSOLUTE `https://github.com/Gearlux/loggair/blob/main/...` URLs: the
+  README is the PyPI long description and PyPI does not resolve relative links. Links between the
+  guides are relative.
+- User docs (README, `docs/*.md`, the example YAML) name no workspace project and no private name
+  (root rule "Published Projects Are Standalone"); examples use `mypkg`, `myapp` and generic class
+  names.
 
 ## Packaging, release, tests
 
