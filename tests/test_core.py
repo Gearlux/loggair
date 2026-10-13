@@ -14,7 +14,6 @@ from loguru import logger
 from loggair.core import (
     _ARCHIVE_RE,
     LoggingState,
-    _resolve_colorize,
     _upgrade_to_enqueue,
     configure_logging,
     force_no_color,
@@ -23,6 +22,7 @@ from loggair.core import (
     reconfigure,
     shutdown_logging,
 )
+from loggair.settings import _resolve_colorize
 
 _needs_usr_signals = pytest.mark.skipif(
     not hasattr(signal, "SIGUSR1"), reason="POSIX user signals unavailable on this platform"
@@ -74,6 +74,8 @@ def test_the_documented_public_functions_are_exported_by_the_package() -> None:
     assert loggair.resolve_settings is loggair.core.resolve_settings
     assert "effective_level_no" in loggair.__all__
     assert "resolve_settings" in loggair.__all__
+    assert loggair.Settings is loggair.settings.Settings
+    assert loggair.Overrides is loggair.settings.Overrides
     # Every advertised name resolves — a typo in __all__ would break `from loggair import *`.
     for name in loggair.__all__:
         assert hasattr(loggair, name), name
@@ -372,6 +374,8 @@ def test_module_levels_workers_only_applies_in_child(tmp_path: Path, monkeypatch
             name = "Worker-1"
 
         monkeypatch.setattr(loggair.core, "current_process", lambda: _FakeProc())
+
+        monkeypatch.setattr(loggair.settings, "current_process", lambda: _FakeProc())
 
         configure_logging(log_dir=tmp_path / "logs", script_name="wo_child")
         _emit("pkg.workeronly", "INFO", "child-info")
@@ -1185,6 +1189,8 @@ def test_runtime_rotation_only_in_main_process(tmp_path: Path, monkeypatch: Any)
         name = "Worker-1"
 
     monkeypatch.setattr(loggair.core, "current_process", lambda: _FakeProc())
+
+    monkeypatch.setattr(loggair.settings, "current_process", lambda: _FakeProc())
 
     configure_logging(log_dir=tmp_path / "logs", script_name="rtchild", rotation="400 B")
     params = loggair.core.LoggingState.file_sink_params

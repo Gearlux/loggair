@@ -1,15 +1,13 @@
 import os
-import re
 import shutil
 import signal
 import sys
 import threading
 import warnings
-from dataclasses import dataclass
 from functools import partial
 from multiprocessing import current_process
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping, Optional, Unpack, cast
 
 from loguru import logger
 
@@ -18,9 +16,8 @@ if TYPE_CHECKING:
 
 from loggair import discovery
 from loggair.alerts import AlertDispatcher
-from loggair.config import load_config
 from loggair.context import clear_context, context_snapshot, get_context
-from loggair.intercept import _VALID_INTERCEPT_MODES, setup_interception, teardown_interception
+from loggair.intercept import setup_interception, teardown_interception
 from loggair.null_logger import NullLogger
 from loggair.rotation import (  # noqa: F401  (re-exported: tests/consumers import via loggair.core)
     _ARCHIVE_RE,
@@ -31,16 +28,8 @@ from loggair.rotation import (  # noqa: F401  (re-exported: tests/consumers impo
     _purge_old_files,
     _rotate,
 )
-from loggair.signals import _install_signal_handlers, _resolve_signal
-
-
-def _str_to_bool(value: Any) -> bool:
-    """Coerce a config/env value to bool (the truthiness used throughout Loggair)."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.lower() in ("true", "1", "t", "y", "yes")
-    return bool(value)
+from loggair.settings import ModuleLevelRule, Overrides, Settings, _str_to_bool, resolve
+from loggair.signals import _install_signal_handlers
 
 
 class LoggingState:
@@ -60,11 +49,9 @@ class LoggingState:
     # re-apply them so a reload never silently drops a programmatic setting
     # (e.g. an explicit log_dir) back to the config-file/default value.
     last_kwargs: Dict[str, Any] = {}
-    # The fully-RESOLVED settings of the last successful configure (all
-    # hierarchy layers applied), JSON-serializable. Served by
-    # :func:`get_active_config`; every new configure_logging knob MUST be
-    # added here too.
-    active_config: Dict[str, Any] = {}
+    # The resolved settings of the last successful configure, served by
+    # :func:`get_active_config` (``to_dict()``) and read by :func:`effective_level_no`.
+    settings: Optional[Settings] = None
     # Active alert dispatcher (webhook/alerting sink), if alert_urls are set.
     alert_dispatcher: Optional[AlertDispatcher] = None
     # Runtime signal bookkeeping (see _install_signal_handlers).
@@ -73,7 +60,7 @@ class LoggingState:
     debug_active: bool = False
     pre_debug_kwargs: Optional[Dict[str, Any]] = None
     # The PARSED `module_levels` rules of the last successful configure. Kept
-    # next to `active_config` (which holds the raw mapping) so
+    # next to `settings` (which holds the raw mapping) so
     # :func:`effective_level_no` answers from the same rules the sink filters
     # apply, instead of re-deriving them from the snapshot.
     module_rules: List["ModuleLevelRule"] = []
@@ -91,7 +78,7 @@ class LoggingState:
         cls.enqueue_active = False
         cls.enqueue_requested = False
         cls.last_kwargs = {}
-        cls.active_config = {}
+        cls.settings = None
         cls.alert_dispatcher = None
         cls.last_signal_thread = None
         cls.debug_active = False
@@ -181,107 +168,7 @@ def _uninstall_lazy_enqueue_hooks() -> None:
     _install_lazy_enqueue_hooks._installed = False  # type: ignore[attr-defined]
 
 
-# --- Sink formats -------------------------------------------------------------
-# The defaults, public so a custom format can EXTEND rather than restate them
-# (e.g. ``file_format=DEFAULT_FILE_FORMAT + " | {extra}"``). Both sinks' filters
-# always stamp ``record["extra"]["rank_tag"]``, so ``{extra[rank_tag]}`` is
-# available to any custom format (and omitting it simply drops the rank tag).
-DEFAULT_CONSOLE_FORMAT = (
-    "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-    "<level>{level: <8}</level> | "
-    "{extra[rank_tag]}<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | "
-    "{extra[context_tag]}<level>{message}</level>"
-)
-DEFAULT_FILE_FORMAT = (
-    "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | "
-    "{extra[rank_tag]}{name}:{function}:{line} | {extra[context_tag]}{message}"
-)
-
-
 # --- Per-logger, per-sink level overrides -----------------------------------
-
-_VALID_RULE_KEYS = {"console", "file", "workers_only"}
-
-
-@dataclass(frozen=True)
-class ModuleLevelRule:
-    """A parsed `module_levels` entry.
-
-    `console_no` / `file_no` are loguru level numbers (`logger.level(name).no`)
-    or `None` to defer to the sink's global level. `workers_only=True` restricts
-    the rule to non-MainProcess processes (e.g. DataLoader workers).
-    """
-
-    prefix: str
-    console_no: Optional[int]
-    file_no: Optional[int]
-    workers_only: bool
-
-
-def _level_no(level: str, where: str) -> int:
-    """`level` as a loguru severity number, or a ValueError naming the setting.
-
-    `where` is the fully-qualified setting the value came from — ``"file_level"``,
-    ``"module_levels['pkg.a'].console"``, ``"alert_level"`` — and it is the ONLY
-    thing the message may name. It used to be prefixed with a hardcoded
-    ``module_levels:`` regardless of the caller, so a bad ``file_level`` reported
-    ``module_levels: invalid level 'X' for file_level`` and sent the reader to the
-    wrong block of their config.
-    """
-    try:
-        return int(logger.level(level.upper()).no)
-    except (ValueError, TypeError) as e:
-        raise ValueError(f"invalid level '{level}' for {where}") from e
-
-
-def _parse_module_levels(cfg: Dict[str, Any]) -> List[ModuleLevelRule]:
-    """Parse and validate the optional ``module_levels`` config block.
-
-    Fails fast on unknown sub-keys or invalid levels — silent ignores are
-    exactly how this feature rotted unimplemented for so long.
-    """
-    raw = cfg.get("module_levels")
-    if raw is None:
-        return []
-    if not isinstance(raw, dict):
-        raise ValueError(f"module_levels: expected a mapping, got {type(raw).__name__}")
-
-    rules: List[ModuleLevelRule] = []
-    for prefix, entry in raw.items():
-        if not isinstance(prefix, str) or not prefix:
-            raise ValueError(f"module_levels: prefix keys must be non-empty strings, got {prefix!r}")
-        if not isinstance(entry, dict):
-            raise ValueError(
-                f"module_levels[{prefix!r}]: expected a mapping with keys {sorted(_VALID_RULE_KEYS)}, "
-                f"got {type(entry).__name__}"
-            )
-        unknown = set(entry.keys()) - _VALID_RULE_KEYS
-        if unknown:
-            raise ValueError(
-                f"module_levels[{prefix!r}]: unknown sub-key(s) {sorted(unknown)}; "
-                f"valid keys are {sorted(_VALID_RULE_KEYS)}"
-            )
-        c = entry.get("console")
-        f = entry.get("file")
-        if c is None and f is None:
-            raise ValueError(f"module_levels[{prefix!r}]: must set at least one of 'console' or 'file'")
-        workers_only = entry.get("workers_only", False)
-        if not isinstance(workers_only, bool):
-            raise ValueError(
-                f"module_levels[{prefix!r}].workers_only: expected bool, got {type(workers_only).__name__}"
-            )
-        rules.append(
-            ModuleLevelRule(
-                prefix=prefix,
-                console_no=(_level_no(c, f"module_levels[{prefix!r}].console") if c is not None else None),
-                file_no=(_level_no(f, f"module_levels[{prefix!r}].file") if f is not None else None),
-                workers_only=workers_only,
-            )
-        )
-
-    # Longest prefix first → first-match wins gives most-specific match.
-    rules.sort(key=lambda r: len(r.prefix), reverse=True)
-    return rules
 
 
 def _matching_rule(name: str, rules: List[ModuleLevelRule]) -> Optional[ModuleLevelRule]:
@@ -394,235 +281,41 @@ def _perform_pivot(
     LoggingState.configured = False
 
 
-def _resolve_colorize(arg: Optional[bool]) -> Optional[bool]:
-    """Resolve the console-sink colorize tri-state.
-
-    Precedence (highest first): explicit ``arg`` (``True``/``False``) > the
-    standard ``NO_COLOR`` env var (any non-empty value -> off, per
-    https://no-color.org) > ``None`` (loguru auto-detect via ``stream.isatty()``,
-    the historical default). ``NO_COLOR`` is the ONLY environment control — there
-    is no bespoke Loggair color env var. Non-interactive consumers (the
-    navigaitor MCP server, the StreamStudio ComfyUI extension) set ``NO_COLOR`` for
-    themselves via :func:`force_no_color`.
-    """
-    if arg is not None:
-        return arg
-    if os.getenv("NO_COLOR"):
-        return False
-    return None
-
-
-def resolve_settings(
-    log_dir: Optional[Union[str, Path]] = None,
-    script_name: Optional[str] = None,
-    file_level: Optional[str] = None,
-    console_level: Optional[str] = None,
-    rotation_on_startup: Optional[bool] = None,
-    retention: Optional[int] = None,
-    compression: Optional[CompressionFormat] = None,
-    enqueue: Optional[bool] = None,
-    colorize: Optional[bool] = None,
-    serialize: Optional[bool] = None,
-    rotation: Optional[str] = None,
-    console_format: Optional[str] = None,
-    file_format: Optional[str] = None,
-    reload_signal: Optional[str] = None,
-    debug_signal: Optional[str] = None,
-    alert_urls: Optional[Union[str, List[str]]] = None,
-    alert_level: Optional[str] = None,
-    alert_throttle: Optional[float] = None,
-    worker_files: Optional[bool] = None,
-    intercept: Optional[str] = None,
-    intercept_exclude: Optional[Union[str, List[str]]] = None,
-    capture_warnings: Optional[bool] = None,
-) -> Dict[str, Any]:
+def resolve_settings(**overrides: Unpack[Overrides]) -> Settings:
     """Resolve every setting through the full hierarchy — PURELY, no side effects.
 
-    The single source of truth for configuration resolution (args > ``LOGGAIR_*``
-    env > local YAML > pyproject > XDG > defaults), shared by
-    :func:`configure_logging` and the ``python -m loggair`` diagnostic. It MUST
-    stay free of side effects: no directory creation, no rotation, no sinks, no
-    env-var writes — a diagnostic that mutates the very state it inspects is a
-    footgun (see the AGENTS resolver-purity mandate). Validation still fails
-    fast here (unknown levels/modes/signals/compression raise ``ValueError``).
+    ``overrides`` are the settings of :class:`loggair.Overrides`; a ``None`` counts
+    as not given. Resolution is args > ``LOGGAIR_*`` env > local YAML >
+    ``pyproject.toml`` > XDG > defaults, by presence, and is shared with
+    :func:`configure_logging` and the ``python -m loggair`` diagnostic — so it MUST
+    stay free of side effects: no directory, no sink, no env write. Validation
+    fails fast here: an unknown level, intercept mode, compression format or
+    signal name raises ``ValueError``, an unknown setting name ``TypeError``.
 
-    Returns a dict of the resolved values: JSON-serializable public keys (the
-    same vocabulary as :func:`get_active_config`) plus ``_``-prefixed internal
-    entries for :func:`configure_logging` (parsed rules, level numbers, `Path`
-    objects, the RAW alert URLs — never expose those; diagnostics must redact).
+    Returns the frozen :class:`loggair.Settings`; its ``to_dict()`` is the
+    JSON-serializable mapping :func:`get_active_config` and the diagnostic print.
+    The raw alert URLs are on ``.alert_urls`` and nowhere in that mapping — they
+    carry tokens.
     """
-    is_main_proc = current_process().name == "MainProcess" and discovery.get_rank() in (None, 0)
-
-    cfg = load_config()
-
-    def resolve(val: Any, env: str, key: str, default: Any) -> Any:
-        # Presence-based resolution — falsy-but-valid values (rotation_on_startup:
-        # false, retention: 0) must win over the default, so never `or`-chain here.
-        # An EMPTY env var counts as unset (matching the historical behavior).
-        if val is not None:
-            return val
-        env_val = os.getenv(env)
-        if env_val:
-            return env_val
-        if key in cfg and cfg[key] is not None:
-            return cfg[key]
-        return default
-
-    log_dir_val = resolve(log_dir, "LOGGAIR_DIR", "log_dir", "./logs")
-    log_dir_path = Path(log_dir_val).expanduser().resolve()
-
-    f_level = str(resolve(file_level, "LOGGAIR_FILE_LEVEL", "file_level", "DEBUG")).upper()
-    c_level = str(resolve(console_level, "LOGGAIR_CONSOLE_LEVEL", "console_level", "INFO")).upper()
-    f_no = _level_no(f_level, "file_level")
-    c_no = _level_no(c_level, "console_level")
-    module_rules = _parse_module_levels(cfg)
-    retention_val = int(resolve(retention, "LOGGAIR_RETENTION", "retention", 5))
-    do_rotation = _str_to_bool(resolve(rotation_on_startup, "LOGGAIR_ROTATION_ON_STARTUP", "rotation_on_startup", True))
-    enqueue_val = _str_to_bool(resolve(enqueue, "LOGGAIR_ENQUEUE", "enqueue", False))
-    serialize_val = _str_to_bool(resolve(serialize, "LOGGAIR_SERIALIZE", "serialize", False))
-    # JSON mode forces colors off: ANSI escapes would otherwise be embedded
-    # inside the serialized "text" field, garbling it for log aggregators.
-    colorize_val = False if serialize_val else _resolve_colorize(colorize)
-
-    console_fmt = str(resolve(console_format, "LOGGAIR_CONSOLE_FORMAT", "console_format", DEFAULT_CONSOLE_FORMAT))
-    file_fmt = str(resolve(file_format, "LOGGAIR_FILE_FORMAT", "file_format", DEFAULT_FILE_FORMAT))
-
-    rotation_val = resolve(rotation, "LOGGAIR_ROTATION", "rotation", None)
-    if rotation_val is not None:
-        rotation_val = str(rotation_val)
-
-    alert_urls_val = resolve(alert_urls, "LOGGAIR_ALERT_URLS", "alert_urls", None)
-    if isinstance(alert_urls_val, str):
-        alert_urls_list = [u.strip() for u in alert_urls_val.split(",") if u.strip()]
-    else:
-        alert_urls_list = [str(u) for u in alert_urls_val] if alert_urls_val else []
-    alert_level_val = str(resolve(alert_level, "LOGGAIR_ALERT_LEVEL", "alert_level", "ERROR")).upper()
-    _level_no(alert_level_val, "alert_level")  # fail fast on unknown level names
-    alert_throttle_val = float(resolve(alert_throttle, "LOGGAIR_ALERT_THROTTLE", "alert_throttle", 60.0))
-
-    intercept_val = str(resolve(intercept, "LOGGAIR_INTERCEPT", "intercept", "full")).lower()
-    if intercept_val not in _VALID_INTERCEPT_MODES:
-        raise ValueError(
-            f"intercept: invalid value {intercept_val!r}; expected one of {sorted(_VALID_INTERCEPT_MODES)}"
-        )
-    intercept_exclude_val = resolve(intercept_exclude, "LOGGAIR_INTERCEPT_EXCLUDE", "intercept_exclude", None)
-    if isinstance(intercept_exclude_val, str):
-        intercept_exclude_list = [p.strip() for p in intercept_exclude_val.split(",") if p.strip()]
-    else:
-        intercept_exclude_list = [str(p) for p in intercept_exclude_val] if intercept_exclude_val else []
-    capture_warnings_val = _str_to_bool(resolve(capture_warnings, "LOGGAIR_CAPTURE_WARNINGS", "capture_warnings", True))
-
-    reload_signal_val = resolve(reload_signal, "LOGGAIR_RELOAD_SIGNAL", "reload_signal", None)
-    debug_signal_val = resolve(debug_signal, "LOGGAIR_DEBUG_SIGNAL", "debug_signal", None)
-    # Validate eagerly (fail fast on a typo'd or platform-unavailable name),
-    # even in processes that won't install the handlers.
-    for sig_spec in (reload_signal_val, debug_signal_val):
-        if sig_spec is not None:
-            _resolve_signal(sig_spec)
-
-    compression_val = resolve(compression, "LOGGAIR_COMPRESSION", "compression", None)
-    if compression_val is not None:
-        compression_val = str(compression_val).lower()
-        if compression_val not in _VALID_COMPRESSIONS:
-            raise ValueError(
-                f"compression: invalid value {compression_val!r}; "
-                f"expected one of {sorted(_VALID_COMPRESSIONS)} or None"
-            )
-
-    target_name = discovery.determine_script_name(resolve(script_name, "LOGGAIR_SCRIPT_NAME", "script_name", None))
-
-    # Per-worker files: each non-main writer gets its own exclusively-owned
-    # file — rank suffix for DDP ranks, process-name suffix for children (a
-    # rank's own children carry both, e.g. app.rank2.worker-1.log).
-    worker_files_val = _str_to_bool(resolve(worker_files, "LOGGAIR_WORKER_FILES", "worker_files", False))
-    suffix_parts: List[str] = []
-    if worker_files_val and not is_main_proc:
-        rank = discovery.get_rank()
-        if rank not in (None, 0):
-            suffix_parts.append(f"rank{rank}")
-        if current_process().name != "MainProcess":
-            proc = re.sub(r"[^A-Za-z0-9_-]+", "-", current_process().name).strip("-").lower()
-            suffix_parts.append(proc or f"pid{os.getpid()}")
-    worker_suffix = "".join(f".{p}" for p in suffix_parts)
-    new_log_file = log_dir_path / f"{target_name}{worker_suffix}.log"
-
-    return {
-        # Public, JSON-serializable (get_active_config vocabulary):
-        "log_dir": str(log_dir_path),
-        "script_name": target_name,
-        "log_file": str(new_log_file),
-        "file_level": f_level,
-        "console_level": c_level,
-        "module_levels": dict(cfg.get("module_levels") or {}),
-        "rotation_on_startup": do_rotation,
-        "retention": retention_val,
-        "compression": compression_val,
-        "rotation": rotation_val,
-        "enqueue": bool(enqueue_val),
-        "colorize": colorize_val,
-        "serialize": serialize_val,
-        "console_format": console_fmt,
-        "file_format": file_fmt,
-        "reload_signal": reload_signal_val,
-        "debug_signal": debug_signal_val,
-        "alert_level": alert_level_val,
-        "alert_throttle": alert_throttle_val,
-        "worker_files": worker_files_val,
-        "intercept": intercept_val,
-        "intercept_exclude": list(intercept_exclude_list),
-        "capture_warnings": capture_warnings_val,
-        "is_main_process": is_main_proc,
-        "rank": discovery.get_rank(),
-        # Internal (never expose raw — alert URLs carry secrets):
-        "_log_dir_path": log_dir_path,
-        "_log_file_path": new_log_file,
-        "_worker_suffix": worker_suffix,
-        "_module_rules": module_rules,
-        "_console_no": c_no,
-        "_file_no": f_no,
-        "_alert_urls": alert_urls_list,
-    }
+    return resolve(overrides).settings
 
 
-def configure_logging(
-    log_dir: Optional[Union[str, Path]] = None,
-    script_name: Optional[str] = None,
-    file_level: Optional[str] = None,
-    console_level: Optional[str] = None,
-    rotation_on_startup: Optional[bool] = None,
-    retention: Optional[int] = None,
-    compression: Optional[CompressionFormat] = None,
-    enqueue: Optional[bool] = None,
-    colorize: Optional[bool] = None,
-    serialize: Optional[bool] = None,
-    rotation: Optional[str] = None,
-    console_format: Optional[str] = None,
-    file_format: Optional[str] = None,
-    reload_signal: Optional[str] = None,
-    debug_signal: Optional[str] = None,
-    alert_urls: Optional[Union[str, List[str]]] = None,
-    alert_level: Optional[str] = None,
-    alert_throttle: Optional[float] = None,
-    worker_files: Optional[bool] = None,
-    intercept: Optional[str] = None,
-    intercept_exclude: Optional[Union[str, List[str]]] = None,
-    capture_warnings: Optional[bool] = None,
-    force: bool = False,
-) -> None:
+def configure_logging(*, force: bool = False, **overrides: Unpack[Overrides]) -> None:
     """Configure Loggair: resolve every setting, then install sinks, interception and signals.
 
-    Every keyword argument is one setting of the configuration reference
-    (``docs/configuration.md``) and of ``loggair.example.yaml``, which document each
-    one's meaning, environment variable and default. This docstring states the
-    contract only.
+    Every keyword argument is a key of :class:`loggair.Overrides` — one setting of
+    the configuration reference (``docs/configuration.md``) and of
+    ``loggair.example.yaml``, which document each one's meaning, environment
+    variable and default; its resolved value is the same-named field of
+    :class:`loggair.Settings`. This docstring states the contract only.
 
     Resolution: an argument that is not ``None`` wins, then the ``LOGGAIR_*``
     environment variable, then ``loggair.yaml`` / ``pyproject.toml`` in the working
     directory, then the XDG user config, then the default — by presence, so a
     falsy-but-valid value (``retention=0``) is honoured. :func:`resolve_settings`
     does that without side effects and raises ``ValueError`` for an unknown level,
-    intercept mode, compression format or signal name; everything below happens
-    only after it succeeds.
+    intercept mode, compression format or signal name, and ``TypeError`` for an
+    unknown setting; everything below happens only after it succeeds.
 
     Once per process: the first :func:`get_logger` calls this with no arguments,
     and a later call without ``force`` is a no-op. ``force=True`` re-resolves and
@@ -640,58 +333,25 @@ def configure_logging(
     ``LOGGAIR_SCRIPT_NAME`` for child processes, installs the signal handlers and
     prunes old archives down to ``retention``.
     """
+    _configure(overrides, force=force)
+
+
+def _configure(overrides: Mapping[str, Any], *, force: bool) -> None:
+    """The body of :func:`configure_logging`, taking a plain mapping so that
+    :func:`reconfigure` and the runtime signals can forward the recorded kwargs."""
     if LoggingState.configured and not force:
         return
 
-    # 1. Resolve Parameters — the PURE shared resolver (also serves the
-    # `python -m loggair` diagnostic); side effects happen only below.
-    settings = resolve_settings(
-        log_dir=log_dir,
-        script_name=script_name,
-        file_level=file_level,
-        console_level=console_level,
-        rotation_on_startup=rotation_on_startup,
-        retention=retention,
-        compression=compression,
-        enqueue=enqueue,
-        colorize=colorize,
-        serialize=serialize,
-        rotation=rotation,
-        console_format=console_format,
-        file_format=file_format,
-        reload_signal=reload_signal,
-        debug_signal=debug_signal,
-        alert_urls=alert_urls,
-        alert_level=alert_level,
-        alert_throttle=alert_throttle,
-        worker_files=worker_files,
-        intercept=intercept,
-        intercept_exclude=intercept_exclude,
-        capture_warnings=capture_warnings,
-    )
-    is_main_proc = settings["is_main_process"]
-    log_dir_path: Path = settings["_log_dir_path"]
-    new_log_file: Path = settings["_log_file_path"]
-    worker_suffix: str = settings["_worker_suffix"]
-    module_rules = settings["_module_rules"]
-    c_no, f_no = settings["_console_no"], settings["_file_no"]
-    alert_urls_list = settings["_alert_urls"]
-    retention_val = settings["retention"]
-    do_rotation = settings["rotation_on_startup"]
-    enqueue_val = settings["enqueue"]
-    colorize_val = settings["colorize"]
-    serialize_val = settings["serialize"]
-    console_fmt, file_fmt = settings["console_format"], settings["file_format"]
-    rotation_val = settings["rotation"]
-    compression_val = settings["compression"]
-    alert_level_val = settings["alert_level"]
-    alert_throttle_val = settings["alert_throttle"]
-    intercept_val = settings["intercept"]
-    intercept_exclude_list = settings["intercept_exclude"]
-    capture_warnings_val = settings["capture_warnings"]
-    reload_signal_val = settings["reload_signal"]
-    debug_signal_val = settings["debug_signal"]
-    target_name = settings["script_name"]
+    # 1. Resolve — the PURE shared resolver (also serves `python -m loggair`);
+    # an unknown setting is refused here, by name, and side effects start below.
+    compiled = resolve(overrides)
+    s = compiled.settings
+    is_main_proc = s.is_main_process
+    log_dir_path = compiled.log_dir_path
+    new_log_file = compiled.log_file_path
+    worker_suffix = compiled.worker_suffix
+    module_rules = compiled.module_rules
+    c_no, f_no = compiled.console_no, compiled.file_no
 
     log_dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -699,13 +359,13 @@ def configure_logging(
     if is_main_proc:
         curr = LoggingState.log_file
         if curr and new_log_file.resolve() != curr.resolve():
-            _perform_pivot(curr, new_log_file, do_rotation, retention_val, compression_val)
-        elif do_rotation and not LoggingState.configured and new_log_file.exists():
-            _rotate(new_log_file, retention_val, compression_val)
-    elif worker_suffix and do_rotation and not LoggingState.configured and new_log_file.exists():
+            _perform_pivot(curr, new_log_file, s.rotation_on_startup, s.retention, s.compression)
+        elif s.rotation_on_startup and not LoggingState.configured and new_log_file.exists():
+            _rotate(new_log_file, s.retention, s.compression)
+    elif worker_suffix and s.rotation_on_startup and not LoggingState.configured and new_log_file.exists():
         # This process exclusively owns its per-worker file, so rotating it is
         # race-free even off the main rank (force_owner bypasses the rank gate).
-        _rotate(new_log_file, retention_val, compression_val, force_owner=True)
+        _rotate(new_log_file, s.retention, s.compression, force_owner=True)
 
     # 3. Setup Sinks
     if not LoggingState.configured or force:
@@ -723,7 +383,7 @@ def configure_logging(
                 # Not "TRACE": see _sink_floor — an open floor defeats loguru's
                 # only cheap early-out and costs ~3.4 us per discarded record.
                 level=_sink_floor("console", c_no, module_rules),
-                format=console_fmt,
+                format=s.console_format,
                 filter=_make_sink_filter("console", c_no, module_rules),
                 # Tri-state (resolved above): True forces colors, False forces
                 # them off (the standard NO_COLOR env var, or colorize=False),
@@ -732,8 +392,8 @@ def configure_logging(
                 # redirected/piped stderr (2> run.log, | tee, plain Jenkins
                 # console) stays plain, and NO_COLOR forces plain when
                 # auto-detection is wrong. serialize forces False (see above).
-                colorize=colorize_val,
-                serialize=serialize_val,
+                colorize=s.colorize,
+                serialize=s.serialize,
             )
 
         # Lazy-enqueue: when the user asks for ``enqueue=True``, defer the
@@ -743,17 +403,17 @@ def configure_logging(
         eager_env = os.getenv("LOGGAIR_EAGER_ENQUEUE")
         force_eager = eager_env is not None and _str_to_bool(eager_env)
         in_child = current_process().name != "MainProcess"
-        start_with_enqueue = enqueue_val and (force_eager or in_child)
+        start_with_enqueue = s.enqueue and (force_eager or in_child)
         file_sink_params: dict = dict(
             sink=str(new_log_file),
             # See _sink_floor. Living inside file_sink_params means the
             # lazy-enqueue re-add in _upgrade_to_enqueue carries it unchanged.
             level=_sink_floor("file", f_no, module_rules),
-            format=file_fmt,
+            format=s.file_format,
             filter=_make_sink_filter("file", f_no, module_rules),
             mode="a",
             enqueue=start_with_enqueue,
-            serialize=serialize_val,
+            serialize=s.serialize,
         )
         # Runtime rotation: a single rotator per FILE. Without worker_files
         # that means the main process only (children share its file); WITH
@@ -762,22 +422,22 @@ def configure_logging(
         # at rotation time (proven per-stem and live-log-safe), so a service
         # that never restarts still gets pruning and compressed archives.
         # Loguru validates the rotation string at add() — fail fast right here.
-        if rotation_val is not None and (is_main_proc or worker_suffix):
-            file_sink_params["rotation"] = rotation_val
-            file_sink_params["retention"] = retention_val
-            file_sink_params["compression"] = compression_val
+        if s.rotation is not None and (is_main_proc or worker_suffix):
+            file_sink_params["rotation"] = s.rotation
+            file_sink_params["retention"] = s.retention
+            file_sink_params["compression"] = s.compression
         sink_id = logger.add(**file_sink_params)
 
         LoggingState.file_sink_id = sink_id
         LoggingState.file_sink_params = file_sink_params
         LoggingState.enqueue_active = start_with_enqueue
-        LoggingState.enqueue_requested = bool(enqueue_val)
+        LoggingState.enqueue_requested = bool(s.enqueue)
 
         # Alerting sink: enqueue-only in the logging path, delivery in the
         # dispatcher's worker thread (zero-blocking mandate). The filter drops
         # the dispatcher's own delivery-failure records (no feedback loop).
-        if alert_urls_list:
-            dispatcher = AlertDispatcher(alert_urls_list, script_name=target_name, throttle=alert_throttle_val)
+        if s.alert_urls:
+            dispatcher = AlertDispatcher(s.alert_urls, script_name=s.script_name, throttle=s.alert_throttle)
 
             def _alert_sink(message: Any) -> None:
                 record = message.record
@@ -785,14 +445,14 @@ def configure_logging(
 
             logger.add(
                 _alert_sink,
-                level=alert_level_val,
-                format=file_fmt,
+                level=s.alert_level,
+                format=s.file_format,
                 filter=lambda r: not r["extra"].get("loggair_alert_internal"),
                 catch=True,
             )
             LoggingState.alert_dispatcher = dispatcher
 
-        if enqueue_val and not start_with_enqueue:
+        if s.enqueue and not start_with_enqueue:
             _install_lazy_enqueue_hooks()
 
     was_cfg = LoggingState.configured
@@ -805,55 +465,19 @@ def configure_logging(
     # third-party stdlib logger (httpx, urllib3, ...) the user explicitly tuned.
     setup_interception(
         module_level_prefixes=[r.prefix for r in module_rules],
-        mode=intercept_val,
-        exclude=intercept_exclude_list,
-        capture_warnings=capture_warnings_val,
+        mode=s.intercept,
+        exclude=s.intercept_exclude,
+        capture_warnings=s.capture_warnings,
     )
 
-    # Remember the explicitly-passed kwargs so reconfigure / signal reloads
-    # re-apply them instead of silently falling back to config-file defaults.
-    explicit = dict(
-        log_dir=log_dir,
-        script_name=script_name,
-        file_level=file_level,
-        console_level=console_level,
-        rotation_on_startup=rotation_on_startup,
-        retention=retention,
-        compression=compression,
-        enqueue=enqueue,
-        colorize=colorize,
-        serialize=serialize,
-        rotation=rotation,
-        console_format=console_format,
-        file_format=file_format,
-        reload_signal=reload_signal,
-        debug_signal=debug_signal,
-        alert_urls=alert_urls,
-        alert_level=alert_level,
-        alert_throttle=alert_throttle,
-        worker_files=worker_files,
-        intercept=intercept,
-        intercept_exclude=intercept_exclude,
-        capture_warnings=capture_warnings,
-    )
-    LoggingState.last_kwargs = {k: v for k, v in explicit.items() if v is not None}
-
-    # Snapshot the RESOLVED settings for get_active_config: derived straight
-    # from the shared resolver output (single source of truth), minus the
-    # "_"-internal keys, plus the runtime-state fields. SECRET-SAFE: the raw
-    # alert URLs are replaced by apprise's privacy-redacted forms — this dict
-    # is a diagnostics/MCP payload and must never carry tokens.
-    LoggingState.active_config = {k: v for k, v in settings.items() if not k.startswith("_")}
-    LoggingState.active_config.update(
-        configured=True,
-        enqueue_active=LoggingState.enqueue_active,
-        debug_mode_active=LoggingState.debug_active,
-        alert_urls=(LoggingState.alert_dispatcher.redacted_urls if LoggingState.alert_dispatcher else []),
-    )
+    # Remember what was passed, for reconfigure / signal reloads, and the resolved
+    # settings for get_active_config (the raw alert URLs stay on it, secret).
+    LoggingState.last_kwargs = {k: v for k, v in overrides.items() if v is not None}
+    LoggingState.settings = s
 
     if is_main_proc:
-        os.environ["LOGGAIR_SCRIPT_NAME"] = target_name
-        _install_signal_handlers(reload_signal_val, debug_signal_val)
+        os.environ["LOGGAIR_SCRIPT_NAME"] = s.script_name
+        _install_signal_handlers(s.reload_signal, s.debug_signal)
 
         # Startup sweep: prune TIMESTAMPED ARCHIVES (plain or compressed) down to
         # `retention` per stem — the same per-stem semantic as `_rotate`, extended
@@ -866,12 +490,12 @@ def configure_logging(
             if m and f.is_file():
                 by_stem.setdefault(m.group("stem"), []).append(f)
         for stem_files in by_stem.values():
-            _purge_old_files(stem_files, retention_val)
+            _purge_old_files(stem_files, s.retention)
 
         logger.info(f"Loggair {'Re-' if was_cfg else ''}initialized: {new_log_file.name}")
 
 
-def reconfigure(**overrides: Any) -> None:
+def reconfigure(**overrides: Unpack[Overrides]) -> None:
     """Re-apply Loggair configuration, overriding the current setup.
 
     A thin convenience wrapper over ``configure_logging(force=True, ...)`` for
@@ -896,7 +520,7 @@ def reconfigure(**overrides: Any) -> None:
 
         loggair.reconfigure(console_level="DEBUG")
     """
-    configure_logging(force=True, **{**LoggingState.last_kwargs, **overrides})
+    _configure({**LoggingState.last_kwargs, **overrides}, force=True)
 
 
 def is_configured() -> bool:
@@ -914,29 +538,28 @@ def get_active_config() -> Dict[str, Any]:
     :func:`configure_logging` / :func:`get_logger` it returns
     ``{"configured": False}``.
 
-    Keys: ``configured``, ``log_dir``, ``script_name``, ``log_file``,
-    ``file_level``, ``console_level``, ``module_levels`` (the validated raw
-    mapping), ``rotation_on_startup``, ``retention``, ``compression``,
-    ``rotation``, ``enqueue`` / ``enqueue_active`` (requested vs.
-    lazily-materialized queue), ``colorize`` (resolved tri-state),
-    ``serialize``, ``console_format`` / ``file_format``, ``reload_signal`` /
-    ``debug_signal``, ``alert_level`` / ``alert_throttle`` / ``alert_urls`` (the URLs
-    privacy-redacted — they carry tokens), ``worker_files``, ``intercept`` /
-    ``intercept_exclude`` / ``capture_warnings``, ``debug_mode_active``,
-    ``experiment_context`` (the live :func:`get_context` values), ``is_main_process``,
-    ``rank``.
+    Keys: every field of :class:`loggair.Settings` (``Settings.to_dict()``) plus
+    ``configured``, ``enqueue_active`` (the lazily-materialized queue, against the
+    requested ``enqueue``), ``debug_mode_active`` (the debug-signal toggle),
+    ``alert_urls`` (privacy-redacted — the raw ones carry tokens) and
+    ``experiment_context`` (the live :func:`get_context` values).
 
     Returns a fresh copy — mutating it does not affect Loggair. Reflects the
     state as of the last (re)configure; ``enqueue_active`` in particular may
     lag a lazy enqueue upgrade until the next reconfigure.
     """
-    if not LoggingState.configured:
+    settings = LoggingState.settings
+    if not LoggingState.configured or settings is None:
         return {"configured": False}
-    snapshot = dict(LoggingState.active_config)
-    snapshot["module_levels"] = {k: dict(v) for k, v in snapshot.get("module_levels", {}).items()}
-    # Live state that can change after configure without a re-snapshot:
-    snapshot["enqueue_active"] = LoggingState.enqueue_active
-    snapshot["debug_mode_active"] = LoggingState.debug_active
+    snapshot = settings.to_dict()
+    # Live state that can change after configure without a re-snapshot; the
+    # alert URLs come from the dispatcher in apprise's privacy-redacted form.
+    snapshot.update(
+        configured=True,
+        enqueue_active=LoggingState.enqueue_active,
+        debug_mode_active=LoggingState.debug_active,
+        alert_urls=(LoggingState.alert_dispatcher.redacted_urls if LoggingState.alert_dispatcher else []),
+    )
     snapshot["experiment_context"] = get_context()
     return snapshot
 
@@ -1077,25 +700,23 @@ def effective_level_no(name: Optional[str] = None) -> int:
         if logger.level("TRACE").no >= effective_level_no(__name__):
             logger.trace("expensive: {}", render(payload))
     """
-    if _logging_disabled() or not LoggingState.configured:
+    settings = LoggingState.settings
+    if _logging_disabled() or not LoggingState.configured or settings is None:
         return NOTHING_REACHABLE
 
-    config = LoggingState.active_config
     rule = _matching_rule(name or "", LoggingState.module_rules)
 
     thresholds: List[int] = []
     # The console sink exists on the main process/rank only (see configure_logging).
-    if config.get("is_main_process"):
+    if settings.is_main_process:
         console = rule.console_no if rule is not None and rule.console_no is not None else None
-        thresholds.append(console if console is not None else int(logger.level(config["console_level"]).no))
+        thresholds.append(console if console is not None else int(logger.level(settings.console_level).no))
     file_no = rule.file_no if rule is not None and rule.file_no is not None else None
-    thresholds.append(file_no if file_no is not None else int(logger.level(config["file_level"]).no))
-    # The alerting sink is a third destination. Its presence is read from the live
-    # dispatcher, NOT from the snapshot: `active_config` deliberately strips the
-    # `_`-prefixed internals, and the raw `alert_urls` are one of them (they carry
-    # tokens and must never appear in a diagnostics payload).
+    thresholds.append(file_no if file_no is not None else int(logger.level(settings.file_level).no))
+    # The alerting sink is a third destination; its presence is read from the live
+    # dispatcher, which exists exactly when `settings.alert_urls` is non-empty.
     if LoggingState.alert_dispatcher is not None:
-        thresholds.append(int(logger.level(config["alert_level"]).no))
+        thresholds.append(int(logger.level(settings.alert_level).no))
 
     return min(thresholds)
 

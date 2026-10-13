@@ -19,26 +19,10 @@ from typing import Any, Optional
 from loguru import logger
 
 import loggair.core
+from loggair.settings import _resolve_signal
 
 # Serializes signal-triggered reconfigurations (rapid repeated signals).
 _signal_action_lock = threading.Lock()
-
-
-def _resolve_signal(name: Any) -> int:
-    """Resolve a signal spec ("SIGUSR1", "usr2", or an int) to its number.
-
-    Fails fast with the valid choices — an unknown name, or a POSIX-only signal
-    on a platform without it (e.g. SIGUSR1 on Windows), raises ``ValueError``.
-    """
-    if isinstance(name, int):
-        return name
-    s = str(name).upper()
-    if not s.startswith("SIG"):
-        s = "SIG" + s
-    val = getattr(signal, s, None)
-    if not isinstance(val, signal.Signals):
-        raise ValueError(f"invalid signal {name!r}; expected a signal name available on this platform, e.g. 'SIGUSR1'")
-    return int(val)
 
 
 def _toggle_debug() -> None:
@@ -46,13 +30,13 @@ def _toggle_debug() -> None:
     core = loggair.core
     if not core.LoggingState.debug_active:
         snapshot = dict(core.LoggingState.last_kwargs)
-        core.configure_logging(force=True, **{**snapshot, "console_level": "DEBUG", "file_level": "DEBUG"})
+        core._configure({**snapshot, "console_level": "DEBUG", "file_level": "DEBUG"}, force=True)
         core.LoggingState.pre_debug_kwargs = snapshot
         core.LoggingState.debug_active = True
         logger.info("Loggair debug mode ON (signal)")
     else:
         snapshot = core.LoggingState.pre_debug_kwargs or {}
-        core.configure_logging(force=True, **snapshot)
+        core._configure(snapshot, force=True)
         core.LoggingState.last_kwargs = dict(snapshot)
         core.LoggingState.debug_active = False
         core.LoggingState.pre_debug_kwargs = None
@@ -64,7 +48,7 @@ def _apply_signal_action(mode: str) -> None:
     core = loggair.core
     with _signal_action_lock:
         if mode == "reload":
-            core.configure_logging(force=True, **core.LoggingState.last_kwargs)
+            core._configure(core.LoggingState.last_kwargs, force=True)
         else:  # "debug"
             _toggle_debug()
 
