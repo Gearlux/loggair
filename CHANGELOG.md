@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **MPI launchers are rank-detected.** `mpirun` / `mpiexec` outside SLURM sets
+  none of `RANK`, `SLURM_PROCID` or `LOCAL_RANK`, so every process of such a
+  launch was rank `None` and every one of them got a console sink. The global
+  rank is now also read from `OMPI_COMM_WORLD_RANK` (Open MPI), `PMI_RANK`
+  (MPICH, Intel MPI), `PMIX_RANK` (PMIx) and `MV2_COMM_WORLD_RANK` (MVAPICH2),
+  after `RANK` and `SLURM_PROCID` and before the `LOCAL_RANK` topology; the
+  diagnostic names whichever variable decided.
+
 ### Changed
 - **Documentation.** The README is a quickstart: install, a first run with its
   output, how settings resolve, a table of common tasks and the document index.
@@ -16,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   processes, per-worker files, rotation and retention, JSON output, experiment
   context, alerting, interception modes, teardown) and `docs/tracing.md`
   (`@track` / `@spy`). Rank detection is described by the environment variables
-  it reads — `RANK`, `SLURM_PROCID`, or `LOCAL_RANK` with the node topology.
+  it reads.
 
 ## [0.2.0] - 2026-08-24
 

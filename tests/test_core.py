@@ -137,6 +137,33 @@ def test_configure_rank_non_zero(tmp_path: Path) -> None:
         del os.environ["RANK"]
 
 
+def test_a_non_zero_mpi_rank_gets_no_console_sink(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    """Under plain `mpirun` only OMPI_COMM_WORLD_RANK (or PMI_RANK, ...) names the
+    rank. Before it was read, every MPI process was rank None and every one of
+    them got a console sink — the log storm Loggair exists to prevent."""
+    monkeypatch.setenv("OMPI_COMM_WORLD_RANK", "1")
+    configure_logging(log_dir=tmp_path, script_name="mpi_app")
+    get_logger("mpi").info("Rank 1 message")
+    shutdown_logging()
+
+    assert capsys.readouterr().err == ""
+    content = (tmp_path / "mpi_app.log").read_text()
+    assert "Rank 1 message" in content
+    assert "[rank 1]" in content
+
+
+def test_mpi_rank_zero_keeps_the_console_sink(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    monkeypatch.setenv("OMPI_COMM_WORLD_RANK", "0")
+    configure_logging(log_dir=tmp_path, script_name="mpi_app")
+    get_logger("mpi").info("Rank 0 message")
+    shutdown_logging()
+
+    assert "Rank 0 message" in capsys.readouterr().err
+    content = (tmp_path / "mpi_app.log").read_text()
+    assert "Rank 0 message" in content
+    assert "[rank" not in content
+
+
 def test_configure_rank_mocked(tmp_path: Path, monkeypatch: Any) -> None:
     log_dir = tmp_path / "mock_rank"
     # Mock get_rank to return 2

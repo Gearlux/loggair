@@ -25,8 +25,8 @@ this workspace `~/.config/loggair/config.yaml` sets `log_dir: ~/logs`: debug a l
 ## Sinks and processes
 
 - Only rank 0 of the main process gets a console sink. The file sink takes every rank and tags
-  non-zero ones `[rank N]`. (`tests/test_core.py::test_configure_rank_non_zero`; the console
-  side is unpinned.)
+  non-zero ones `[rank N]`. (file side `tests/test_core.py::test_configure_rank_non_zero`, console
+  side `::test_a_non_zero_mpi_rank_gets_no_console_sink`)
 - Never block the caller: the alert sink only enqueues, and multi-process file writes go
   through loguru's `enqueue=True`. Add no network I/O or per-record locking to the record path.
   `enqueue` defaults to off.
@@ -64,7 +64,11 @@ this workspace `~/.config/loggair/config.yaml` sets `log_dir: ~/logs`: debug a l
   - Public keys are the `get_active_config()` vocabulary (the snapshot derives from them);
     `_`-prefixed keys are internal. `_alert_urls` is raw and is never printed: the diagnostic
     masks everything after the scheme. A resolution `ValueError` is reported with exit 1.
-  - Rank detection is `discovery.detect_rank()`; `get_rank()` caches it. Never copy its list.
+  - Rank detection is `discovery.detect_rank()`; `get_rank()` caches it. The direct-rank variables
+    are `discovery._RANK_VARS` — torchrun's `RANK`, SLURM's `SLURM_PROCID`, then the MPI launchers'
+    (`OMPI_COMM_WORLD_RANK`, `PMI_RANK`, `PMIX_RANK`, `MV2_COMM_WORLD_RANK`) — followed by the
+    `LOCAL_RANK` topology. Never copy the list; a new launcher is one entry there plus a
+    `tests/test_discovery.py` case. (`tests/test_discovery.py::test_an_mpi_launcher_rank_is_detected_and_its_variable_named`)
   - The shadow guard at the top of `__main__.py` REMOVES the `sys.path` entry that shadows the
     package (a workspace root's empty `loggair/` folder) and re-imports the real one: a scoped
     exception to the no-`sys.path`-hacks rule (removal, diagnostic process only). Never copy it
