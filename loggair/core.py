@@ -19,15 +19,7 @@ from loggair.alerts import AlertDispatcher
 from loggair.context import clear_context, context_snapshot, get_context
 from loggair.intercept import setup_interception, teardown_interception
 from loggair.null_logger import NullLogger
-from loggair.rotation import (  # noqa: F401  (re-exported: tests/consumers import via loggair.core)
-    _ARCHIVE_RE,
-    _COMPRESSION_GLOB_SUFFIXES,
-    _VALID_COMPRESSIONS,
-    CompressionFormat,
-    _compress_file,
-    _purge_old_files,
-    _rotate,
-)
+from loggair.rotation import _ARCHIVE_RE, _purge_old_files, _rotate
 from loggair.settings import ModuleLevelRule, Overrides, Settings, _str_to_bool, resolve
 from loggair.signals import _install_signal_handlers
 
