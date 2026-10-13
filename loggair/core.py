@@ -609,107 +609,36 @@ def configure_logging(
     capture_warnings: Optional[bool] = None,
     force: bool = False,
 ) -> None:
-    """
-    Configure the global Loggair system with Atomic Pivot support.
+    """Configure Loggair: resolve every setting, then install sinks, interception and signals.
 
-    ``colorize`` controls console-sink ANSI coloring as a tri-state:
-    ``True`` forces colors on, ``False`` forces them off, and ``None`` (the
-    default) defers to the standard ``NO_COLOR`` env var, falling back to
-    loguru's TTY auto-detection. See :func:`_resolve_colorize`.
+    Every keyword argument is one setting of the configuration reference
+    (``docs/configuration.md``) and of ``loggair.example.yaml``, which document each
+    one's meaning, environment variable and default. This docstring states the
+    contract only.
 
-    ``compression`` (``"gz"`` / ``"zip"`` / ``None``) compresses each
-    startup-rotated log archive. Because Loggair performs its own rotation, this
-    is applied by :func:`_rotate` (NOT loguru's sink-level ``compression=``).
-    Resolved through the standard hierarchy: arg > ``LOGGAIR_COMPRESSION`` env >
-    ``compression`` YAML key > ``None``.
+    Resolution: an argument that is not ``None`` wins, then the ``LOGGAIR_*``
+    environment variable, then ``loggair.yaml`` / ``pyproject.toml`` in the working
+    directory, then the XDG user config, then the default — by presence, so a
+    falsy-but-valid value (``retention=0``) is honoured. :func:`resolve_settings`
+    does that without side effects and raises ``ValueError`` for an unknown level,
+    intercept mode, compression format or signal name; everything below happens
+    only after it succeeds.
 
-    ``serialize`` switches BOTH sinks to structured JSON output (one object per
-    line) via loguru's native ``serialize=True``: ``{"text": <formatted line>,
-    "record": {...}}`` with the full structured record (level, timestamp,
-    name/function/line, process/thread, ``extra`` incl. Loggair's rank tag) —
-    the format log aggregators (Elasticsearch/Kibana, Loki, Datadog) ingest
-    directly. When enabled, console coloring is FORCED off regardless of
-    ``colorize``/``NO_COLOR``: ANSI codes would otherwise be embedded inside the
-    JSON ``text`` field (verified empirically). Resolved through the standard
-    hierarchy: arg > ``LOGGAIR_SERIALIZE`` env > ``serialize`` YAML key >
-    ``False``.
+    Once per process: the first :func:`get_logger` calls this with no arguments,
+    and a later call without ``force`` is a no-op. ``force=True`` re-resolves and
+    rebuilds the sinks — :func:`reconfigure` and the runtime signals use it, and
+    re-applying the previous explicit arguments is their job, not this function's.
 
-    ``rotation`` enables RUNTIME rotation of the file sink for long-running
-    processes (multi-week training loops, FastAPI/MCP services) — passed to
-    loguru verbatim, so all its forms work: ``"100 MB"``, ``"daily"``,
-    ``"1 week"``, ``"00:00"``, ``"monday at 12:00"``. Invalid values raise
-    ``ValueError`` at configure time. Applied in the MAIN process only (single
-    rotator — a rename racing multiple writers would split streams); when
-    active, loguru's sink-level ``retention=`` (same `retention` count, proven
-    per-stem and live-log-safe) and ``compression=`` (same `compression` value)
-    prune/compress at rotation time, so a service that never restarts still
-    honors both. Startup rotation composes unchanged. Multi-writer caveat: a
-    spawn-started child that reconfigures its own sink keeps its fd after a
-    main-process rotation, so its subsequent records land in the rotated
-    archive (fork-inherited children route through the enqueue queue and are
-    unaffected). Resolved: arg > ``LOGGAIR_ROTATION`` env > ``rotation`` YAML
-    key > ``None`` (startup-only rotation, the historical behavior).
-
-    ``console_format`` / ``file_format`` override the per-sink loguru format
-    strings (defaults: :data:`DEFAULT_CONSOLE_FORMAT` /
-    :data:`DEFAULT_FILE_FORMAT` — extend rather than restate, e.g.
-    ``file_format=DEFAULT_FILE_FORMAT + " | {extra}"``). Any loguru field works
-    (``{process.id}``, ``{thread.id}``, ``{extra[...]}``, color markup on the
-    console). ``{extra[rank_tag]}`` is always stamped and available. Invalid
-    color markup fails fast at configure time; a format referencing a
-    nonexistent field does NOT (loguru reports a loud per-record error on
-    stderr instead — the record is dropped). Resolved through the standard
-    hierarchy: arg > ``LOGGAIR_CONSOLE_FORMAT`` / ``LOGGAIR_FILE_FORMAT`` env >
-    ``console_format`` / ``file_format`` YAML keys > the defaults.
-
-    ``reload_signal`` / ``debug_signal`` (POSIX signal names, e.g. ``"SIGUSR1"``
-    / ``"SIGUSR2"``; default off) enable runtime verbosity control for
-    long-running processes without a restart. On ``reload_signal`` Loggair
-    re-resolves env vars + config files and reloads the sinks (edit
-    ``loggair.yaml``, then ``kill -USR1 <pid>``) — the original call's explicit
-    arguments are re-applied, so a reload only picks up changes for settings
-    not pinned programmatically. On ``debug_signal`` Loggair TOGGLES both sinks
-    to DEBUG and back (no file edit needed — the "diagnose a live training
-    anomaly" switch). Handlers are installed in the main process/thread only;
-    invalid or platform-unavailable signal names raise ``ValueError``.
-    Resolved: arg > ``LOGGAIR_RELOAD_SIGNAL`` / ``LOGGAIR_DEBUG_SIGNAL`` env >
-    matching YAML keys > ``None``.
-
-    ``alert_urls`` (list, or comma-separated string) routes records at or above
-    ``alert_level`` (default ``"ERROR"``) to external platforms via
-    `apprise <https://github.com/caronc/apprise>`_ URLs — Slack, Teams,
-    Discord, email, generic webhooks, ~100 services (optional dependency:
-    ``pip install loggair[alerts]``). Never blocks the logging path: records
-    are queued and a background worker delivers them, batching everything
-    since the last delivery into one notification, at most one delivery per
-    ``alert_throttle`` seconds (default 60; ``0`` disables throttling). Invalid
-    URLs and unknown levels raise at configure time. Installed in EVERY
-    process (a worker/rank crash alerts too — the throttle collapses storms).
-    Resolved: args > ``LOGGAIR_ALERT_URLS`` / ``LOGGAIR_ALERT_LEVEL`` /
-    ``LOGGAIR_ALERT_THROTTLE`` env > matching YAML keys > off.
-
-    ``worker_files`` (default False) gives every NON-main writer its own log
-    file instead of appending to the shared ``{name}.log``: DDP ranks write
-    ``{name}.rank{N}.log`` and spawned/forked child processes
-    ``{name}.{process-name}.log`` (a rank's own children combine both parts).
-    Each process then EXCLUSIVELY owns its file, which removes the multi-writer
-    caveats wholesale: worker files get startup rotation AND runtime
-    ``rotation`` too (safe — sole writer), and no rotation can ever split
-    another process's stream. Merge at read time with ``lnav ./logs``. The
-    startup sweep still never deletes the bare per-worker files (live-log-safe
-    rule), only their timestamped archives. Resolved: arg >
-    ``LOGGAIR_WORKER_FILES`` env > ``worker_files`` YAML key > ``False``.
-
-    ``intercept`` selects how aggressively stdlib logging is taken over —
-    ``"full"`` (default: Loggair owns the root, existing named loggers are
-    stripped to propagate), ``"coexist"`` (append-only next to a framework
-    that owns logging, e.g. uvicorn — other handlers untouched), or ``"off"``.
-    ``intercept_exclude`` (list, or comma-separated) names dotted logger
-    prefixes Loggair leaves completely alone even in full mode.
-    ``capture_warnings`` (default True) controls the ``warnings.showwarning``
-    redirect. See :data:`loggair.intercept.InterceptMode`. Resolved: args >
-    ``LOGGAIR_INTERCEPT`` / ``LOGGAIR_INTERCEPT_EXCLUDE`` /
-    ``LOGGAIR_CAPTURE_WARNINGS`` env > matching YAML keys > defaults.
+    What it does, in order: creates ``log_dir``; rotates an existing log file
+    (startup rotation — the shared file by the main process of rank 0, a per-worker
+    file by its owner) or pivots from an interim file to a new path; adds the
+    console sink (main process of rank 0 only) and the file sink (every process,
+    lazily enqueued when ``enqueue`` is requested), plus the alert sink when
+    ``alert_urls`` are set; installs stdlib/warnings interception per ``intercept``;
+    records the explicit arguments for reloads and the resolved settings for
+    :func:`get_active_config`; and, in the main process of rank 0, exports
+    ``LOGGAIR_SCRIPT_NAME`` for child processes, installs the signal handlers and
+    prunes old archives down to ``retention``.
     """
     if LoggingState.configured and not force:
         return
