@@ -155,8 +155,8 @@ has the same problem.
   every record, which is what makes it cheap; a mechanism that changed a
   threshold without touching the generation would go unnoticed by the guard.
 - `effective_level_no` reads the live dispatcher to decide whether the alerting
-  sink exists, rather than the settings snapshot — `active_config` strips the
-  `_`-prefixed internals, and the raw alert URLs are among them because they
+  sink exists; the dispatcher is built exactly when `Settings.alert_urls` is
+  non-empty, and that field is secret (never in `to_dict()`) because the URLs
   carry tokens.
 - It is read-only and never triggers the lazy configuration; an unconfigured
   Loggair has no sinks, so nothing is reachable and the decorator stays inert
@@ -788,3 +788,88 @@ hierarchy. Pins:
 - `tests/test_config.py`
 - `tests/test_core.py::test_configure_env_overrides_file`
 - `tests/test_core.py::test_configure_args_overrides_env`
+
+---
+
+## `Settings` is the one declaration of the configuration; the docs are pinned to it
+
+*2026-10-13*
+
+### Context
+
+Every setting used to be spelled in `core.py` nine times: the `resolve_settings`
+signature, its per-key `resolve(...)` line, its return dict, the `configure_logging`
+signature, the pass-through call, the local unpack, the `explicit` dict kept for
+reloads, and the `get_active_config` docstring — plus the example YAML and the
+reference table. Nothing failed when one was forgotten: a setting missing from the
+return dict silently vanished from `get_active_config()` and the diagnostic, one
+missing from the `explicit` dict silently stopped being reloadable by
+`reconfigure()` and the signals. In two releases no setting was added, so the cost
+had not been paid; the refactor was done because the shape invited the defect, not
+because it had struck.
+
+### Decision
+
+`loggair/settings.py` holds a frozen, keyword-only dataclass `Settings` with one
+field per public key of the resolved configuration, in the order the public mapping
+always had. A settable field's metadata carries its `Spec`: the `LOGGAIR_*` variable,
+whether config files may set it, the raw default, and the coercion applied to a value
+from any source (`int`, the level validator, the comma-split for lists, ...).
+`resolve()` walks the fields — presence-based, override then env then files then
+default, exactly the old rule — then computes the derived fields (`script_name`,
+`log_file`, `module_levels`, `is_main_process`, `rank`) and returns a `Compiled`
+pair: the public `Settings` and the internals `configure_logging` needs (paths, parsed
+rules, level numbers). `alert_urls` is a `secret` field: reachable in-process, dropped
+by `Settings.to_dict()`, so no diagnostics payload can carry a token by accident.
+
+`Overrides` is a `TypedDict(total=False)` naming what may be passed;
+`configure_logging(*, force=False, **overrides: Unpack[Overrides])`,
+`reconfigure(**overrides)` and `resolve_settings(**overrides)` take it. An unknown
+key is refused by name before any side effect. The arguments are keyword-only — no
+caller in the workspace passed them positionally.
+
+Two pins hold the shape: `tests/test_settings.py` asserts that `Overrides` and the
+settable `Settings` fields are the same set, and that every setting with a `Spec`
+appears as a key and an `Env:` line in `loggair.example.yaml` and as a row in
+`docs/configuration.md`. Adding a setting without its documentation fails there.
+
+### Consequences
+
+- A new setting is one `Settings` field plus one `Overrides` key, then the two
+  documents the pin demands. `get_active_config()`, the diagnostic and the reload
+  path pick it up without an edit.
+- `resolve_settings()` returns a `Settings`, not a dict; `to_dict()` is the old
+  mapping, key for key and in the same order, so `get_active_config()` and
+  `python -m loggair --json` print exactly what they did.
+- Validation runs in field order. With two invalid values in one configuration the
+  first error reported may differ from before; with one it is the same message.
+- `Settings` has no defaults: it is a resolved object, constructed only by
+  `resolve()`. The raw defaults live in each field's `Spec` and are what the
+  documentation pin checks.
+- `signals.py` and `reconfigure()` forward a plain mapping to `core._configure`;
+  only the public entry points carry the `Overrides` type.
+
+### Example
+
+```python
+# loggair/settings.py
+@dataclass(frozen=True, kw_only=True)
+class Settings:
+    retention: int = setting(5, env="LOGGAIR_RETENTION", coerce=as_int)
+    ...
+
+# a consumer
+import loggair
+s = loggair.resolve_settings(retention=0)       # presence wins: 0 stays 0
+s.retention                                      # 0
+s.to_dict()["retention"]                         # 0, in the mapping the diagnostic prints
+loggair.configure_logging(retentoin=3)
+# TypeError: loggair: unknown setting 'retentoin'; valid settings are alert_level, ...
+```
+
+### What you may change
+
+The coercions, the field order (the public order follows it — change the golden
+list in `tests/test_settings.py` deliberately), and which fields are derived. Do
+not give `Settings` defaults, do not spell a setting outside the dataclass and
+`Overrides`, and do not let `to_dict()` emit a `secret` field.

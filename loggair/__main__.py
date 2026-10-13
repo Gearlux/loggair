@@ -100,8 +100,8 @@ def _collect_report() -> Dict[str, Any]:
         report["shadowed_path_ignored"] = _SHADOWED_PATH
     try:
         settings = resolve_settings()
-        resolved = {k: v for k, v in settings.items() if not k.startswith("_")}
-        resolved["alert_urls"] = _redact_alert_urls(settings["_alert_urls"])
+        resolved = settings.to_dict()  # the public mapping; the raw URLs are not in it
+        resolved["alert_urls"] = _redact_alert_urls(settings.alert_urls)
         report["resolved"] = resolved
     except ValueError as e:
         report["resolution_error"] = str(e)

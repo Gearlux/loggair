@@ -12,8 +12,8 @@ stdlib/framework interception, call tracing. Feature-complete. `0.2.0` on PyPI, 
 from the public repo `Gearlux/loggair`. Python >= 3.12. Hard dependencies are `loguru` and
 `pyyaml` only; `apprise` is the optional `[alerts]` extra; Confluid is never a dependency.
 
-Modules in `loggair/`: `core.py` (state, `resolve_settings()`, `configure_logging` and friends,
-sinks and filters, `get_logger`, `effective_level_no`), `rotation.py`, `signals.py`,
+Modules in `loggair/`: `settings.py` (`Settings`, `Overrides`, the resolver), `core.py` (state,
+`configure_logging` and friends, sinks and filters, `get_logger`, `effective_level_no`), `rotation.py`, `signals.py`,
 `intercept.py`, `context.py`, `alerts.py`, `discovery.py` (rank, script name), `config.py`
 (config-file layers), `null_logger.py`, `track.py` (`@track` / `@spy`, level `TRAIL`) and
 `__main__.py` (the read-only diagnostic: `python -m loggair`, also the `loggair` console script).
@@ -56,14 +56,18 @@ this workspace `~/.config/loggair/config.yaml` sets `log_dir: ~/logs`: debug a l
   chain: `rotation_on_startup: false` and `retention: 0` must win. An empty env var is unset.
   Files merge SHALLOWLY: a local `module_levels:` replaces the global one.
   (`tests/test_core.py::test_yaml_retention_zero_is_honored`)
-- `core.resolve_settings()` is the ONE resolver and stays PURE: no mkdir, rotation, sink,
+- `settings.resolve()` (public face `loggair.resolve_settings()`) is the ONE resolver and stays PURE:
+  no mkdir, rotation, sink,
   interception, signal or env write (`configure_logging` does those afterwards), because
   `python -m loggair` calls it next to live runs and stays read-only.
   (`tests/test_diagnostic.py::test_resolve_settings_is_side_effect_free`,
   `::test_main_reports_without_configuring_or_rotating`)
-  - Public keys are the `get_active_config()` vocabulary (the snapshot derives from them);
-    `_`-prefixed keys are internal. `_alert_urls` is raw and is never printed: the diagnostic
+  - `Settings` (`loggair/settings.py`) is the ONE declaration: a settable field's metadata `Spec`
+    carries its env var, raw default, config-file eligibility and coercion; `Overrides` is the
+    typed face of `configure_logging(**overrides)`. `to_dict()` is the `get_active_config()`
+    vocabulary, in field order. `alert_urls` is `secret`: never in `to_dict()`, the diagnostic
     masks everything after the scheme. A resolution `ValueError` is reported with exit 1.
+    (`tests/test_settings.py`) Record: "`Settings` is the one declaration".
   - Rank detection is `discovery.detect_rank()`; `get_rank()` caches it. The direct-rank variables
     are `discovery._RANK_VARS` — torchrun's `RANK`, SLURM's `SLURM_PROCID`, then the MPI launchers'
     (`OMPI_COMM_WORLD_RANK`, `PMI_RANK`, `PMIX_RANK`, `MV2_COMM_WORLD_RANK`) — followed by the
@@ -73,9 +77,11 @@ this workspace `~/.config/loggair/config.yaml` sets `log_dir: ~/logs`: debug a l
     package (a workspace root's empty `loggair/` folder) and re-imports the real one: a scoped
     exception to the no-`sys.path`-hacks rule (removal, diagnostic process only). Never copy it
     into library code. (`tests/test_diagnostic.py::test_python_dash_m_self_heals_package_shadowing`)
-- `get_active_config()` tracks every knob: a new `configure_logging` knob goes into
-  `resolve_settings()`'s public keys in the same change. It stays JSON-serializable and
-  read-only: `{"configured": False}` before configuration, never a lazy configure. Live flags
+- A new setting is ONE `Settings` field plus ONE `Overrides` key, then its row in
+  `docs/configuration.md` and its key and `Env:` line in `loggair.example.yaml` — the pin
+  `tests/test_settings.py::test_every_setting_is_documented_in_the_example_yaml_and_the_reference`
+  fails otherwise. `get_active_config()` stays JSON-serializable and read-only:
+  `{"configured": False}` before configuration, never a lazy configure. Live flags
   (`enqueue_active`, `debug_mode_active`) are read from `LoggingState` at call time.
   (`tests/test_diagnostic.py::test_resolve_settings_matches_active_config`)
 - `reconfigure(**overrides)` and the signal reload re-apply the last explicit

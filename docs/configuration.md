@@ -92,7 +92,9 @@ key with its default, its environment variable and a comment.
 | `alert_throttle` | `LOGGAIR_ALERT_THROTTLE` | `60` | Seconds between alert deliveries; `0` delivers every batch |
 
 Every key is also a keyword argument of `configure_logging()`, except
-`module_levels` (a mapping, config files only). List values given through an
+`module_levels` (a mapping, config files only); the arguments are keyword-only
+and typed by `loggair.Overrides`, and the resolved values are the fields of
+`loggair.Settings`, one per row of this table. List values given through an
 environment variable (`intercept_exclude`, `alert_urls`) are comma-separated;
 booleans accept `1`, `true`, `yes`, `t`, `y`. An unknown level, intercept mode,
 compression format or signal name raises `ValueError` at configure time — nothing
@@ -401,5 +403,15 @@ resolved settings (args omitted — env > files > defaults):
   Only if no real installation exists at all does it exit 2 with instructions.
 
 Programmatic equivalents: `loggair.get_active_config()` for the settings a
-*configured* process is running with, and `loggair.resolve_settings()`
-for the same dry resolution this tool prints.
+*configured* process is running with, and `loggair.resolve_settings()` for the
+same dry resolution this tool prints — it returns a frozen `loggair.Settings`
+whose `to_dict()` is the JSON-serializable mapping above (without the alert
+URLs, which carry tokens):
+
+```python
+import loggair
+
+settings = loggair.resolve_settings(console_level="DEBUG")   # pure: nothing is configured
+settings.retention            # 5
+settings.to_dict()["log_dir"]  # the absolute path it would log to
+```

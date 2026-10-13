@@ -28,7 +28,7 @@ def test_resolve_settings_is_side_effect_free(tmp_path: Path, monkeypatch: Any) 
 
     settings = resolve_settings()
 
-    assert settings["log_dir"].endswith("never_created")
+    assert settings.log_dir.endswith("never_created")
     assert not (tmp_path / "never_created").exists()  # no mkdir
     assert LoggingState.configured is False  # no configure
     assert "LOGGAIR_SCRIPT_NAME" not in os.environ  # no env write
@@ -41,9 +41,7 @@ def test_resolve_settings_matches_active_config(tmp_path: Path, monkeypatch: Any
     configure_logging(log_dir=tmp_path / "logs", script_name="match", retention=3, serialize=True)
 
     active = loggair.get_active_config()
-    for key, value in pre.items():
-        if key.startswith("_") or key == "alert_urls":
-            continue
+    for key, value in pre.to_dict().items():
         assert active[key] == value, key
 
 
