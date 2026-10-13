@@ -294,12 +294,12 @@ it), while `opt(depth=1)` filled `function` and `line` from the caller's frame.
 Run against a real trainer, that produced:
 
 ```
-sonair.lightning_classifier:_construct:1164 | → LightningClassifier.__init__(...)
+mypkg.trainer:_construct:1164 | → Trainer.__init__(...)
 ```
 
-`sonair/lightning_classifier.py` is 159 lines long, and `_construct` is in
-`confluid/engine.py`. The reference cannot be opened, and nothing in the line says
-it is a composite of two files.
+`mypkg/trainer.py` is 159 lines long, and `_construct` is in a configuration
+framework's `engine.py`. The reference cannot be opened, and nothing in the line
+says it is a composite of two files.
 
 ### Decision
 
@@ -455,13 +455,13 @@ that has not started. A plausible lie in a debugging tool is worse than a refusa
 
 Inherited methods were originally left alone entirely. Running this against a real
 trainer showed why that is not enough, and why the answer still cannot be "trace
-everything": `sonair.LightningClassifier` defines **one** traceable method and
+everything": a Lightning trainer class defines **one** traceable method and
 inherits **167**, distributed like this:
 
 | | traceable methods |
 | --- | --- |
 | the class itself | 1 |
-| its own project's bases (`sonair`, `matrainer`, `recordstream`) | 31 |
+| its own workspace's bases (three projects checked out beside it) | 31 |
 | `pytorch_lightning` + mixins | 92 |
 | `torch.nn.Module` | 44 |
 
@@ -541,7 +541,8 @@ which is the direction to fail in — a missing trace line against a lost run.
 - Decorating a class that is itself installed, with `"source"`, traces only its own
   methods. The alternative reading — "same root as the decorated class" — would
   trace all of `torch` from a `torch` subclass, which is worse.
-- Measured on that trainer: `inherited=LightningRunnable` took one run from 2 trace
+- Measured on that trainer: `inherited=TrainerBase` (its own project's base class)
+  took one run from 2 trace
   records to 176, covering `fit`, `training_step`, `validation_step`, the epoch
   hooks and `configure_optimizers`, with Lightning and torch untouched.
 
@@ -558,7 +559,7 @@ class Pipeline:
 
 
 @spy(inherited="source")             # + every base you have the source for
-class Trainer(LightningRunnable): ...
+class Trainer(TrainerBase): ...
 ```
 
 ```
