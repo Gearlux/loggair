@@ -16,7 +16,7 @@ def test_rotate_non_zero_rank(tmp_path: Path, monkeypatch: Any) -> None:
 
     monkeypatch.setattr(loggair.discovery, "get_rank", lambda: 1)
 
-    from loggair.core import _rotate
+    from loggair.rotation import _rotate
 
     _rotate(log_file)
 
@@ -45,7 +45,7 @@ def test_rotate_cleanup_error(tmp_path: Path, monkeypatch: Any) -> None:
 
     monkeypatch.setattr(Path, "unlink", mock_unlink)
 
-    from loggair.core import _rotate
+    from loggair.rotation import _rotate
 
     # Trigger rotation with retention=0 to force cleanup of old_file
     _rotate(log_file, retention=0)
@@ -175,7 +175,7 @@ def test_rotate_rename_generic_exception(tmp_path: Path, monkeypatch: Any) -> No
 
     monkeypatch.setattr(Path, "rename", mock_rename)
 
-    from loggair.core import _rotate
+    from loggair.rotation import _rotate
 
     _rotate(log_file)
     assert log_file.exists()

@@ -15,9 +15,9 @@ from typing import Any
 import pytest
 
 from loggair import core
-from loggair.core import _compress_file, _rotate, configure_logging, get_logger, is_configured, shutdown_logging
+from loggair.core import configure_logging, get_logger, is_configured, shutdown_logging
 from loggair.null_logger import NullLogger, _NullLevel
-from loggair.rotation import _purge_old_files
+from loggair.rotation import _compress_file, _purge_old_files, _rotate
 
 # ---------------------------------------------------------------------------
 # NullLogger API
