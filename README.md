@@ -56,8 +56,8 @@ What happened without any configuration:
   first; the last 5 archives are kept.
 - Standard-library `logging` and `warnings` were redirected into the same two
   sinks.
-- In a `torchrun` or SLURM job the same script prints from rank 0 only; the file
-  keeps every rank, tagged `[rank N]`.
+- In a `torchrun`, SLURM or `mpirun` job the same script prints from rank 0
+  only; the file keeps every rank, tagged `[rank N]`.
 
 Levels are Loguru's — `TRACE`, `DEBUG`, `INFO`, `SUCCESS`, `WARNING`, `ERROR`,
 `CRITICAL` — plus `TRAIL` for call tracing. `get_logger(name)` mirrors
@@ -120,8 +120,9 @@ logger = get_logger(__name__)
 logger.info("Initializing process group...")   # console: once, from rank 0; file: every rank
 ```
 
-Ranks are read from `RANK`, `SLURM_PROCID`, or `LOCAL_RANK` with the node
-topology. `enqueue: true` routes a shared file through a multiprocessing queue
+Ranks are read from `RANK`, `SLURM_PROCID`, the MPI launchers' own variables
+(`OMPI_COMM_WORLD_RANK`, `PMI_RANK`, `PMIX_RANK`, `MV2_COMM_WORLD_RANK`), or
+`LOCAL_RANK` with the node topology. `enqueue: true` routes a shared file through a multiprocessing queue
 that is allocated only when the first child process appears; `worker_files: true`
 gives each writer its own file instead. The [operations guide][operations] covers
 both, with rotation, retention and alerting for long-lived jobs.

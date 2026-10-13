@@ -8,10 +8,13 @@ variables and defaults, in the [configuration reference](configuration.md).
 
 ## Ranks and processes
 
-Loggair reads the rank of the current process from the environment: `RANK` or
-`SLURM_PROCID` directly, else `LOCAL_RANK` combined with the node topology
-(`NODE_RANK` or `GROUP_RANK`, times `LOCAL_WORLD_SIZE`). That covers `torchrun`,
-SLURM `srun`, and any launcher that sets one of those variables;
+Loggair reads the rank of the current process from the environment, in this
+order: `RANK` (torchrun), `SLURM_PROCID` (srun), an MPI launcher's own global
+rank — `OMPI_COMM_WORLD_RANK` (Open MPI), `PMI_RANK` (MPICH, Intel MPI),
+`PMIX_RANK` (PMIx), `MV2_COMM_WORLD_RANK` (MVAPICH2) — else `LOCAL_RANK`
+combined with the node topology (`NODE_RANK` or `GROUP_RANK`, times
+`LOCAL_WORLD_SIZE`). That covers `torchrun`, `srun`, `mpirun` / `mpiexec`, and
+any launcher that sets one of those variables;
 [`python -m loggair`](configuration.md#diagnostics) prints the detected rank and
 the variable that decided it.
 
