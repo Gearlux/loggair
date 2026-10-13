@@ -5,7 +5,9 @@ user documentation: *why* something exists, what was deliberately rejected, and
 what a change to it would ripple into.
 
 The user-facing surface — how to configure a sink, how to use a decorator, how to
-register your own extension — lives in [`README.md`](../README.md). The
+register your own extension — lives in the [README](../README.md) (the quickstart)
+and the guides beside this file: [`configuration.md`](configuration.md),
+[`operations.md`](operations.md) and [`tracing.md`](tracing.md). The
 agent-facing rulebook lives in [`AGENTS.md`](../AGENTS.md). This file answers
 "why is it built this way?"; those answer "how do I use it?" and "what must I not
 break?".

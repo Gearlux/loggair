@@ -5,6 +5,19 @@ All notable changes to Loggair are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Documentation.** The README is a quickstart: install, a first run with its
+  output, how settings resolve, a table of common tasks and the document index.
+  The feature guides live in `docs/configuration.md` (every setting with its
+  environment variable and default, per-logger levels, coloring, formats, runtime
+  changes, introspection, the diagnostic), `docs/operations.md` (ranks and
+  processes, per-worker files, rotation and retention, JSON output, experiment
+  context, alerting, interception modes, teardown) and `docs/tracing.md`
+  (`@track` / `@spy`). Rank detection is described by the environment variables
+  it reads — `RANK`, `SLURM_PROCID`, or `LOCAL_RANK` with the node topology.
+
 ## [0.2.0] - 2026-08-24
 
 ### Added
