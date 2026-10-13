@@ -1,6 +1,9 @@
 import os
+from typing import Any
 
-from loggair.discovery import determine_script_name, get_rank
+import pytest
+
+from loggair.discovery import detect_rank, determine_script_name, get_rank
 
 
 def test_get_rank_none() -> None:
@@ -150,3 +153,39 @@ def test_determine_script_name_flag_rejection() -> None:
             assert name == "app"
         finally:
             sys.argv = old_argv
+
+
+# --- MPI launchers -----------------------------------------------------------
+# `mpirun` / `mpiexec` outside SLURM sets none of RANK, SLURM_PROCID or
+# LOCAL_RANK; each MPI implementation exports its own global-rank variable.
+
+
+@pytest.mark.parametrize("var", ["OMPI_COMM_WORLD_RANK", "PMI_RANK", "PMIX_RANK", "MV2_COMM_WORLD_RANK"])
+def test_an_mpi_launcher_rank_is_detected_and_its_variable_named(monkeypatch: Any, var: str) -> None:
+    monkeypatch.setenv(var, "4")
+    assert detect_rank() == (4, var)
+    assert get_rank() == 4
+
+
+def test_torchrun_and_slurm_ranks_win_over_an_mpi_rank(monkeypatch: Any) -> None:
+    # Under `srun` both are set and agree; when they do not, the launcher that
+    # Loggair already honoured keeps deciding.
+    monkeypatch.setenv("OMPI_COMM_WORLD_RANK", "7")
+    monkeypatch.setenv("SLURM_PROCID", "2")
+    assert detect_rank() == (2, "SLURM_PROCID")
+    monkeypatch.setenv("RANK", "1")
+    assert detect_rank() == (1, "RANK")
+
+
+def test_an_mpi_rank_wins_over_the_local_rank_topology(monkeypatch: Any) -> None:
+    # A global MPI rank is a direct answer; LOCAL_RANK is only a derivation.
+    monkeypatch.setenv("PMI_RANK", "5")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
+    assert detect_rank() == (5, "PMI_RANK")
+
+
+def test_an_unparseable_mpi_rank_falls_through_to_the_next_variable(monkeypatch: Any) -> None:
+    monkeypatch.setenv("OMPI_COMM_WORLD_RANK", "not_an_int")
+    monkeypatch.setenv("PMI_RANK", "3")
+    assert detect_rank() == (3, "PMI_RANK")

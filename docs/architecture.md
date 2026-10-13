@@ -5,7 +5,9 @@ user documentation: *why* something exists, what was deliberately rejected, and
 what a change to it would ripple into.
 
 The user-facing surface — how to configure a sink, how to use a decorator, how to
-register your own extension — lives in [`README.md`](../README.md). The
+register your own extension — lives in the [README](../README.md) (the quickstart)
+and the guides beside this file: [`configuration.md`](configuration.md),
+[`operations.md`](operations.md) and [`tracing.md`](tracing.md). The
 agent-facing rulebook lives in [`AGENTS.md`](../AGENTS.md). This file answers
 "why is it built this way?"; those answer "how do I use it?" and "what must I not
 break?".
@@ -153,8 +155,8 @@ has the same problem.
   every record, which is what makes it cheap; a mechanism that changed a
   threshold without touching the generation would go unnoticed by the guard.
 - `effective_level_no` reads the live dispatcher to decide whether the alerting
-  sink exists, rather than the settings snapshot — `active_config` strips the
-  `_`-prefixed internals, and the raw alert URLs are among them because they
+  sink exists; the dispatcher is built exactly when `Settings.alert_urls` is
+  non-empty, and that field is secret (never in `to_dict()`) because the URLs
   carry tokens.
 - It is read-only and never triggers the lazy configuration; an unconfigured
   Loggair has no sinks, so nothing is reachable and the decorator stays inert
@@ -164,7 +166,7 @@ has the same problem.
 
 ```python
 from loguru import logger
-from loggair.core import effective_level_no
+from loggair import effective_level_no
 
 if logger.level("TRACE").no >= effective_level_no(__name__):
     logger.trace("tensor stats: {}", expensive_summary(batch))
@@ -292,12 +294,12 @@ it), while `opt(depth=1)` filled `function` and `line` from the caller's frame.
 Run against a real trainer, that produced:
 
 ```
-sonair.lightning_classifier:_construct:1164 | → LightningClassifier.__init__(...)
+mypkg.trainer:_construct:1164 | → Trainer.__init__(...)
 ```
 
-`sonair/lightning_classifier.py` is 159 lines long, and `_construct` is in
-`confluid/engine.py`. The reference cannot be opened, and nothing in the line says
-it is a composite of two files.
+`mypkg/trainer.py` is 159 lines long, and `_construct` is in a configuration
+framework's `engine.py`. The reference cannot be opened, and nothing in the line
+says it is a composite of two files.
 
 ### Decision
 
@@ -453,13 +455,13 @@ that has not started. A plausible lie in a debugging tool is worse than a refusa
 
 Inherited methods were originally left alone entirely. Running this against a real
 trainer showed why that is not enough, and why the answer still cannot be "trace
-everything": `sonair.LightningClassifier` defines **one** traceable method and
+everything": a Lightning trainer class defines **one** traceable method and
 inherits **167**, distributed like this:
 
 | | traceable methods |
 | --- | --- |
 | the class itself | 1 |
-| its own project's bases (`sonair`, `matrainer`, `recordstream`) | 31 |
+| its own workspace's bases (three projects checked out beside it) | 31 |
 | `pytorch_lightning` + mixins | 92 |
 | `torch.nn.Module` | 44 |
 
@@ -539,7 +541,8 @@ which is the direction to fail in — a missing trace line against a lost run.
 - Decorating a class that is itself installed, with `"source"`, traces only its own
   methods. The alternative reading — "same root as the decorated class" — would
   trace all of `torch` from a `torch` subclass, which is worse.
-- Measured on that trainer: `inherited=LightningRunnable` took one run from 2 trace
+- Measured on that trainer: `inherited=TrainerBase` (its own project's base class)
+  took one run from 2 trace
   records to 176, covering `fit`, `training_step`, `validation_step`, the epoch
   hooks and `configure_optimizers`, with Lightning and torch untouched.
 
@@ -556,7 +559,7 @@ class Pipeline:
 
 
 @spy(inherited="source")             # + every base you have the source for
-class Trainer(LightningRunnable): ...
+class Trainer(TrainerBase): ...
 ```
 
 ```
@@ -571,3 +574,302 @@ dunders and `_private` names are not). The spelling of the `inherited=` bound. W
 you may not change is the in-place mutation without checking what depends on class
 identity, or the rule that wrappers land on the decorated class rather than the
 base.
+
+---
+
+## Rotation: Loggair renames at startup, loguru rotates at runtime, and a live log is never purged
+
+*2026-07-05, extended 2026-08-24*
+
+### Context
+
+Three requirements pull on one log directory.
+
+1. Every run gets a fresh file, so a log maps one-to-one onto an experiment. That is a
+   *startup* event, once per run and not once per process.
+2. A service that never restarts must still bound its file. That is a *runtime* event.
+3. The directory is shared. A centralized `~/logs` holds the live `{name}.log` of every
+   concurrently running script, and several processes of one run write the same file.
+
+Loguru ships runtime rotation (`rotation=`, with `retention=` and `compression=` applied at
+rotation time) but no startup rotation. A rename that races several writers splits their
+streams, because each keeps writing to the inode it already holds.
+
+### Decision
+
+- **Startup rotation is Loggair's own.** `_rotate` renames `{name}.log` to
+  `{name}.{timestamp}.log`, compresses it if asked, and prunes archives. For the shared file
+  only the main process of rank 0 runs it. Loguru's sink-level `compression=` never fires on
+  a rename Loggair made itself, so `_compress_file` does the compression, best-effort: on any
+  failure it warns, removes a partial archive and keeps the original, so a rotated log is
+  never lost.
+- **Runtime rotation is loguru's.** The `rotation` value goes verbatim to `rotation=` on the
+  file sink. Loguru validates it at `add()`, so a bad value fails at configure time and
+  Loggair never parses sizes or times. `retention=` and `compression=` go in the same call,
+  so a process that never restarts still prunes and compresses.
+- **One rotator per file.** On the shared file, runtime rotation is applied only in the main
+  process of rank 0. A spawn-started child that re-adds its own sink keeps its descriptor and
+  keeps writing into the archive (a documented caveat); fork-inherited children write through
+  the enqueue queue and are safe. With `worker_files=True` each process owns its file
+  exclusively, so each rotates its own, at startup (`_rotate(..., force_owner=True)`) and at
+  runtime.
+- **Retention is per stem and counts archives only.** Both purges (`_rotate` and the startup
+  sweep in `configure_logging`) match `_ARCHIVE_RE`: `{stem}.{timestamp}.log` with an optional
+  `.gz`/`.zip`. `_TIMESTAMP_RE` accepts both naming schemes, the startup
+  `YYYY-MM-DD_HH-MM-SS` and loguru's runtime form with a `_ffffff` microseconds suffix. The
+  sweep also prunes stems left by earlier runs under other script names.
+- **A bare `{name}.log` is never a purge candidate.** In a shared directory it may be the
+  live sink of another running process; unlinking it discards that run's output while loguru
+  keeps writing to the unlinked inode.
+- **A purge tolerates candidates vanishing.** Another process may purge the same stem
+  concurrently, so a candidate can disappear between the directory listing and the
+  `stat()`/`unlink()`. No pre-check can close that race, which makes it the sanctioned
+  try/except exception to checking first: skip the vanished file silently, never warn, still
+  enforce `retention` on the survivors.
+
+### Consequences
+
+- A shared directory can hold any mix of startup and runtime archives of one stem, compressed
+  or not, and one `retention` count governs them all.
+- Another script's live log survives any number of this script's startups.
+- Compression has one vocabulary, a closed `Literal["gz", "zip"]`. The validation set, the
+  archive suffix and the purge regex all derive from it, so a new format is one edit.
+- The spawn-child caveat has one fix: `worker_files`.
+
+### Example
+
+```yaml
+log_dir: ~/logs
+rotation: "100 MB"
+retention: 5
+compression: gz
+worker_files: true
+```
+
+After a few days of a DDP run, the log directory holds:
+
+```
+train.log                                   # main process, live
+train.2026-10-01_09-00-02.log.gz            # startup archive: Loggair renamed and compressed it
+train.2026-10-01_14-31-07_381204.log.gz     # runtime archive: loguru, microseconds suffix
+train.rank2.log                             # rank 2's own live file
+other_script.log                            # another script's live sink: never a candidate
+```
+
+### What you may change
+
+The default `retention`, the set of compression formats (edit the `Literal`), and the archive
+naming as long as `_ARCHIVE_RE` still recognises both schemes. Do not pass the sweep a bare
+`{name}.log`, apply runtime rotation to a file several processes share, or reimplement
+loguru's size and time parsing. Pins:
+- `tests/test_forensics.py::test_sweep_never_deletes_other_scripts_live_logs`
+- `tests/test_disable_and_compression.py::test_purge_tolerates_candidate_vanishing_before_stat`
+- `tests/test_core.py::test_runtime_rotation_only_in_main_process`
+- `tests/test_worker_files.py::test_worker_runtime_rotation_of_owned_file`
+
+---
+
+## Runtime control is by signal, never by polling
+
+*2026-07-04*
+
+### Context
+
+A multi-week training job or a long-lived service needs its verbosity changed without a
+restart: raise to `DEBUG` to diagnose an anomaly, or pick up an edited `loggair.yaml`. Three
+mechanisms could do it: a thread that polls the config file, a POSIX signal, or a programmatic
+`reconfigure()` call.
+
+A signal handler is where this goes wrong. Python runs it on the main thread at an arbitrary
+bytecode boundary. Loguru's handler and core locks are plain non-reentrant `threading.Lock`s,
+so a `logger.remove()` or `logger.add()` from a handler that interrupted an in-flight `emit`
+finds the lock held by its own thread and deadlocks.
+
+### Decision
+
+`reload_signal` and `debug_signal` are opt-in settings. Their handlers do one thing: start a
+daemon thread (`_apply_signal_action`) and return, so the work waits for the lock like any
+other thread. The thread is stored on `LoggingState.last_signal_thread`, which tests `join()`
+instead of sleeping. Handlers are installed in the main process and main thread only.
+
+Config-file polling was considered and rejected. A watcher thread in every process breaks the
+zero-overhead principle for a feature most runs never use, and `reload_signal` already covers
+the edit-then-apply workflow.
+
+### Consequences
+
+- A reload re-applies the arguments of the original `configure_logging` call
+  (`LoggingState.last_kwargs`) under any overrides, so it only picks up changes for settings
+  that came from env vars or config files. A setting pinned by an argument is not
+  signal-reloadable.
+- The debug toggle snapshots `last_kwargs` before raising both sinks to `DEBUG` and restores
+  the snapshot when toggled off.
+- `reconfigure()` is the signal-free route to the same reload.
+
+### Example
+
+```yaml
+# loggair.yaml
+reload_signal: SIGUSR1   # re-resolve env + config files, reload the sinks
+debug_signal: SIGUSR2    # toggle DEBUG on both sinks
+```
+
+```
+kill -USR2 <pid>    # DEBUG on
+kill -USR2 <pid>    # DEBUG off, the previous levels restored
+```
+
+```python
+def _handler(signum, frame):
+    t = threading.Thread(target=_apply_signal_action, args=(mode,), daemon=True)
+    LoggingState.last_signal_thread = t   # tests join() it
+    t.start()                             # nothing else: no logger.remove()/add() here
+```
+
+### What you may change
+
+Which signals exist and their names. Do not call into loguru from a handler, and do not add a
+polling watcher without first changing the zero-overhead requirement. Pins:
+- `tests/test_core.py::test_debug_signal_toggles_debug_mode`
+- `tests/test_core.py::test_reload_signal_applies_edited_config`
+- `tests/test_core.py::test_reconfigure_preserves_explicit_args`
+
+---
+
+## The configuration loader is bespoke; a handler-spec loader was not adopted
+
+*2026-07-04*
+
+### Context
+
+Loguru has a small third-party loader, `loguru-config`, that maps a config file directly onto
+`logger.configure()`: the user declares raw sinks. It had a single release in 2023-07, about
+545 lines, and no resolution hierarchy (one file, no env vars, no `pyproject.toml` table, no
+XDG fallback) at the time it was evaluated.
+
+Loggair's keys (`log_dir`, `script_name`, `rotation_on_startup`, `retention`, `compression`,
+`module_levels`, `enqueue`, `serialize`) are not sinks. They are policies that Loggair
+compiles into sinks, filters, rotation and pivot behavior and lazy enqueue.
+
+### Decision
+
+`loggair/config.py` stays: about 50 lines that find four locations (`loggair.yaml` or
+`loggair.yml`, `pyproject.toml` under `[tool.loggair]`, the XDG `config.yaml`) and merge them
+shallowly. `resolve_settings()` then layers function arguments and `LOGGAIR_*` env vars on
+top.
+
+### Consequences
+
+- Raw handler specs would bypass rank-zero filtering, rank tags, `module_levels`, startup
+  rotation and the colorize tri-state entirely.
+- The shallow merge is documented behavior, not a bug: a local `module_levels:` replaces the
+  global one wholesale.
+- There is no second loader to keep in step with loguru's handler schema.
+
+### Example
+
+Measured with `~/.config/loggair/config.yaml` holding `retention: 3` and
+`module_levels: {pkg.a: {file: DEBUG}}`, a local `loggair.yaml` holding
+`module_levels: {pkg.b: {file: DEBUG}}`, and no env vars:
+
+```
+resolve_settings()["retention"]       -> 3                       # from the global file
+resolve_settings()["module_levels"]   -> {'pkg.b': {'file': 'DEBUG'}}   # pkg.a replaced
+```
+
+With `LOGGAIR_RETENTION=7` in the environment, `retention` is `7` and `module_levels` is
+unchanged.
+
+### What you may change
+
+The set of config locations, and the merge if the shallow rule is reconsidered with the user.
+Do not hand sink definitions to a config file, and do not add a second precedence rule to the
+hierarchy. Pins:
+- `tests/test_config.py`
+- `tests/test_core.py::test_configure_env_overrides_file`
+- `tests/test_core.py::test_configure_args_overrides_env`
+
+---
+
+## `Settings` is the one declaration of the configuration; the docs are pinned to it
+
+*2026-10-13*
+
+### Context
+
+Every setting used to be spelled in `core.py` nine times: the `resolve_settings`
+signature, its per-key `resolve(...)` line, its return dict, the `configure_logging`
+signature, the pass-through call, the local unpack, the `explicit` dict kept for
+reloads, and the `get_active_config` docstring — plus the example YAML and the
+reference table. Nothing failed when one was forgotten: a setting missing from the
+return dict silently vanished from `get_active_config()` and the diagnostic, one
+missing from the `explicit` dict silently stopped being reloadable by
+`reconfigure()` and the signals. In two releases no setting was added, so the cost
+had not been paid; the refactor was done because the shape invited the defect, not
+because it had struck.
+
+### Decision
+
+`loggair/settings.py` holds a frozen, keyword-only dataclass `Settings` with one
+field per public key of the resolved configuration, in the order the public mapping
+always had. A settable field's metadata carries its `Spec`: the `LOGGAIR_*` variable,
+whether config files may set it, the raw default, and the coercion applied to a value
+from any source (`int`, the level validator, the comma-split for lists, ...).
+`resolve()` walks the fields — presence-based, override then env then files then
+default, exactly the old rule — then computes the derived fields (`script_name`,
+`log_file`, `module_levels`, `is_main_process`, `rank`) and returns a `Compiled`
+pair: the public `Settings` and the internals `configure_logging` needs (paths, parsed
+rules, level numbers). `alert_urls` is a `secret` field: reachable in-process, dropped
+by `Settings.to_dict()`, so no diagnostics payload can carry a token by accident.
+
+`Overrides` is a `TypedDict(total=False)` naming what may be passed;
+`configure_logging(*, force=False, **overrides: Unpack[Overrides])`,
+`reconfigure(**overrides)` and `resolve_settings(**overrides)` take it. An unknown
+key is refused by name before any side effect. The arguments are keyword-only — no
+caller in the workspace passed them positionally.
+
+Two pins hold the shape: `tests/test_settings.py` asserts that `Overrides` and the
+settable `Settings` fields are the same set, and that every setting with a `Spec`
+appears as a key and an `Env:` line in `loggair.example.yaml` and as a row in
+`docs/configuration.md`. Adding a setting without its documentation fails there.
+
+### Consequences
+
+- A new setting is one `Settings` field plus one `Overrides` key, then the two
+  documents the pin demands. `get_active_config()`, the diagnostic and the reload
+  path pick it up without an edit.
+- `resolve_settings()` returns a `Settings`, not a dict; `to_dict()` is the old
+  mapping, key for key and in the same order, so `get_active_config()` and
+  `python -m loggair --json` print exactly what they did.
+- Validation runs in field order. With two invalid values in one configuration the
+  first error reported may differ from before; with one it is the same message.
+- `Settings` has no defaults: it is a resolved object, constructed only by
+  `resolve()`. The raw defaults live in each field's `Spec` and are what the
+  documentation pin checks.
+- `signals.py` and `reconfigure()` forward a plain mapping to `core._configure`;
+  only the public entry points carry the `Overrides` type.
+
+### Example
+
+```python
+# loggair/settings.py
+@dataclass(frozen=True, kw_only=True)
+class Settings:
+    retention: int = setting(5, env="LOGGAIR_RETENTION", coerce=as_int)
+    ...
+
+# a consumer
+import loggair
+s = loggair.resolve_settings(retention=0)       # presence wins: 0 stays 0
+s.retention                                      # 0
+s.to_dict()["retention"]                         # 0, in the mapping the diagnostic prints
+loggair.configure_logging(retentoin=3)
+# TypeError: loggair: unknown setting 'retentoin'; valid settings are alert_level, ...
+```
+
+### What you may change
+
+The coercions, the field order (the public order follows it — change the golden
+list in `tests/test_settings.py` deliberately), and which fields are derived. Do
+not give `Settings` defaults, do not spell a setting outside the dataclass and
+`Overrides`, and do not let `to_dict()` emit a `secret` field.

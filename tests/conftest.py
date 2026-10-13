@@ -21,7 +21,17 @@ def global_reset_loggair(tmp_path: Any, monkeypatch: Any) -> Generator[None, Non
             os.environ.pop(k)
 
     # 3. Clear MPI/DDP vars that might interfere
-    for k in ("RANK", "LOCAL_RANK", "NODE_RANK", "GROUP_RANK", "SLURM_PROCID"):
+    for k in (
+        "RANK",
+        "LOCAL_RANK",
+        "NODE_RANK",
+        "GROUP_RANK",
+        "SLURM_PROCID",
+        "OMPI_COMM_WORLD_RANK",
+        "PMI_RANK",
+        "PMIX_RANK",
+        "MV2_COMM_WORLD_RANK",
+    ):
         os.environ.pop(k, None)
 
     # 4. Full teardown: sinks, interception, monkey-patches, state pointers

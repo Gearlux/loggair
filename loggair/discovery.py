@@ -4,15 +4,33 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Tuple
 
+# Variables that carry a process's GLOBAL rank directly, in the order they
+# decide. `RANK` is torchrun's (and the generic convention), `SLURM_PROCID` is
+# srun's; the rest are what an `mpirun` / `mpiexec` launch exports OUTSIDE
+# SLURM — Open MPI, MPICH / Intel MPI / Hydra, PMIx (Open MPI 5), MVAPICH2.
+# Before they were read, every process of such a launch was rank None and
+# every one of them got a console sink. Under `srun` the MPI variables agree
+# with SLURM_PROCID, so the order only matters when a launcher sets one alone.
+# The `python -m loggair` diagnostic names whichever variable decided.
+_RANK_VARS = (
+    "RANK",
+    "SLURM_PROCID",
+    "OMPI_COMM_WORLD_RANK",
+    "PMI_RANK",
+    "PMIX_RANK",
+    "MV2_COMM_WORLD_RANK",
+)
+
 
 def detect_rank() -> Tuple[Optional[int], Optional[str]]:
     """Detect the distributed rank AND which environment source decided it.
 
     Uncached, pure read of the environment — the shared detection used by the
     cached :func:`get_rank` (hot path) and by the ``python -m loggair``
-    diagnostic (which reports the deciding source, e.g. ``"SLURM_PROCID"`` or
-    the ``LOCAL_RANK`` topology computation). Returns ``(rank, source)``;
-    ``(None, None)`` when no distributed environment is detected.
+    diagnostic (which reports the deciding source, e.g. ``"SLURM_PROCID"``,
+    ``"OMPI_COMM_WORLD_RANK"`` or the ``LOCAL_RANK`` topology computation).
+    Returns ``(rank, source)``; ``(None, None)`` when no distributed
+    environment is detected.
     """
 
     def from_env(var: str) -> Optional[int]:
@@ -21,8 +39,8 @@ def detect_rank() -> Tuple[Optional[int], Optional[str]]:
         except (ValueError, TypeError):
             return None
 
-    # Priority 1: Direct Ranks
-    for var in ("RANK", "SLURM_PROCID"):
+    # Priority 1: Direct global ranks (torchrun, SLURM, the MPI launchers)
+    for var in _RANK_VARS:
         rank = from_env(var)
         if rank is not None:
             return rank, var
@@ -41,8 +59,10 @@ def detect_rank() -> Tuple[Optional[int], Optional[str]]:
 def get_rank() -> Optional[int]:
     """
     Detect the rank of the current process in a distributed environment.
-    Supports PyTorch DDP (torchrun), SLURM, and MPI. Cached (hot path — the
-    sink filters call this per record); detection lives in :func:`detect_rank`.
+    Supports PyTorch DDP (torchrun), SLURM, and the MPI launchers (Open MPI,
+    MPICH / Intel MPI, PMIx, MVAPICH2 — see :data:`_RANK_VARS`). Cached (hot
+    path — the sink filters call this per record); detection lives in
+    :func:`detect_rank`.
     """
     return detect_rank()[0]
 

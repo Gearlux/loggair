@@ -1,4 +1,4 @@
-"""Call tracing with @track and @spy — see README section 19.
+"""Call tracing with @track and @spy — see docs/tracing.md.
 
 Runs standalone: writes to ./logs under a temporary directory and prints the
 console output it produced. Confluid is optional here (it is not a Loggair
