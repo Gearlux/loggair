@@ -166,7 +166,7 @@ has the same problem.
 
 ```python
 from loguru import logger
-from loggair.core import effective_level_no
+from loggair import effective_level_no
 
 if logger.level("TRACE").no >= effective_level_no(__name__):
     logger.trace("tensor stats: {}", expensive_summary(batch))
