@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (MPICH, Intel MPI), `PMIX_RANK` (PMIx) and `MV2_COMM_WORLD_RANK` (MVAPICH2),
   after `RANK` and `SLURM_PROCID` and before the `LOCAL_RANK` topology; the
   diagnostic names whichever variable decided.
+- **`effective_level_no` and `resolve_settings` are exported from the package.**
+  Both were documented for users — gate an expensive log payload on the first,
+  dry-run the configuration hierarchy with the second — but importable only from
+  `loggair.core`. `from loggair import effective_level_no, resolve_settings` now
+  works, and both are in `__all__`.
 
 ### Changed
 - **Documentation.** The README is a quickstart: install, a first run with its

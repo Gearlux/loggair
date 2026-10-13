@@ -63,6 +63,22 @@ def test_version_exposed_at_runtime() -> None:
     assert "__version__" in loggair.__all__
 
 
+def test_the_documented_public_functions_are_exported_by_the_package() -> None:
+    """The guides tell users to gate expensive logging on `effective_level_no` and
+    to dry-run the resolver with `resolve_settings`; both must be importable from
+    `loggair` itself, not only from the `core` module they are defined in."""
+    import loggair
+    import loggair.core
+
+    assert loggair.effective_level_no is loggair.core.effective_level_no
+    assert loggair.resolve_settings is loggair.core.resolve_settings
+    assert "effective_level_no" in loggair.__all__
+    assert "resolve_settings" in loggair.__all__
+    # Every advertised name resolves — a typo in __all__ would break `from loggair import *`.
+    for name in loggair.__all__:
+        assert hasattr(loggair, name), name
+
+
 def test_configure_default(tmp_path: Path) -> None:
     log_dir = tmp_path / "logs"
     script_name = "test_app"

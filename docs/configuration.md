@@ -401,5 +401,5 @@ resolved settings (args omitted — env > files > defaults):
   Only if no real installation exists at all does it exit 2 with instructions.
 
 Programmatic equivalents: `loggair.get_active_config()` for the settings a
-*configured* process is running with, and `loggair.core.resolve_settings()`
+*configured* process is running with, and `loggair.resolve_settings()`
 for the same dry resolution this tool prints.
