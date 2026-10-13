@@ -5,6 +5,7 @@ from typing import Any
 
 import loggair.core
 import loggair.discovery
+import loggair.settings
 from loggair import get_active_config, get_logger, shutdown_logging
 from loggair.core import LoggingState, configure_logging
 
@@ -19,6 +20,7 @@ def _patch_rank(monkeypatch: Any, rank: int) -> None:
 
 def _patch_worker(monkeypatch: Any) -> None:
     monkeypatch.setattr(loggair.core, "current_process", lambda: _FakeWorker())
+    monkeypatch.setattr(loggair.settings, "current_process", lambda: _FakeWorker())
 
 
 def test_rank_gets_own_file(tmp_path: Path, monkeypatch: Any) -> None:

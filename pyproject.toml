@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "loggair"
-version = "0.2.0"
+version = "0.2.1"
 description = "Modern, multiprocess-safe logging for High-Performance Computing and ML."
 readme = "README.md"
 authors = [{name = "Gert Behiels"}]
@@ -37,12 +37,12 @@ requires-python = ">=3.12"
 # The diagnostic as a console script: entry-point scripts do NOT put the cwd
 # on sys.path, so `loggair` works from ANY directory — including a workspace
 # root containing a loggair/ project folder, where `python -m loggair` gets
-# namespace-shadowed under an editable install (see README §18).
+# namespace-shadowed under an editable install (see docs/configuration.md, "Diagnostics").
 loggair = "loggair.__main__:main"
 
 [project.optional-dependencies]
 # Webhook/alerting sink (alert_urls): apprise delivers to ~100 services
-# (Slack, Teams, email, generic webhooks) via URL configs — see README §15.
+# (Slack, Teams, email, generic webhooks) via URL configs — see docs/operations.md, "Alerting".
 alerts = [
     "apprise>=1.9.0",
 ]

@@ -5,6 +5,43 @@ All notable changes to Loggair are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-10-13
+
+### Added
+- **MPI launchers are rank-detected.** `mpirun` / `mpiexec` outside SLURM sets
+  none of `RANK`, `SLURM_PROCID` or `LOCAL_RANK`, so every process of such a
+  launch was rank `None` and every one of them got a console sink. The global
+  rank is now also read from `OMPI_COMM_WORLD_RANK` (Open MPI), `PMI_RANK`
+  (MPICH, Intel MPI), `PMIX_RANK` (PMIx) and `MV2_COMM_WORLD_RANK` (MVAPICH2),
+  after `RANK` and `SLURM_PROCID` and before the `LOCAL_RANK` topology; the
+  diagnostic names whichever variable decided.
+- **`effective_level_no` and `resolve_settings` are exported from the package.**
+  Both were documented for users — gate an expensive log payload on the first,
+  dry-run the configuration hierarchy with the second — but importable only from
+  `loggair.core`. `from loggair import effective_level_no, resolve_settings` now
+  works, and both are in `__all__`.
+
+### Changed
+- **One declaration of the configuration.** `loggair.Settings` is a frozen dataclass
+  with one field per setting; its field metadata carries the environment variable,
+  the default and the coercion, and `resolve_settings()` now returns it instead of a
+  dict — `Settings.to_dict()` is the old mapping, same keys, same order, so
+  `get_active_config()` and `python -m loggair --json` print exactly what they did.
+  `configure_logging`, `reconfigure` and `resolve_settings` take keyword-only
+  arguments typed by `loggair.Overrides`; an unknown setting is refused by name
+  (`TypeError: loggair: unknown setting 'retentoin'; valid settings are ...`) before
+  any side effect. Both types are exported. Tests pin `Overrides` to `Settings` and
+  pin `loggair.example.yaml` and the configuration reference to every setting.
+- **Documentation.** The README is a quickstart: install, a first run with its
+  output, how settings resolve, a table of common tasks and the document index.
+  The feature guides live in `docs/configuration.md` (every setting with its
+  environment variable and default, per-logger levels, coloring, formats, runtime
+  changes, introspection, the diagnostic), `docs/operations.md` (ranks and
+  processes, per-worker files, rotation and retention, JSON output, experiment
+  context, alerting, interception modes, teardown) and `docs/tracing.md`
+  (`@track` / `@spy`). Rank detection is described by the environment variables
+  it reads.
+
 ## [0.2.0] - 2026-08-24
 
 ### Added

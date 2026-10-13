@@ -14,7 +14,6 @@ from loguru import logger
 from loggair.core import (
     _ARCHIVE_RE,
     LoggingState,
-    _resolve_colorize,
     _upgrade_to_enqueue,
     configure_logging,
     force_no_color,
@@ -23,6 +22,7 @@ from loggair.core import (
     reconfigure,
     shutdown_logging,
 )
+from loggair.settings import _resolve_colorize
 
 _needs_usr_signals = pytest.mark.skipif(
     not hasattr(signal, "SIGUSR1"), reason="POSIX user signals unavailable on this platform"
@@ -61,6 +61,24 @@ def test_version_exposed_at_runtime() -> None:
     assert isinstance(loggair.__version__, str)
     assert re.fullmatch(r"\d+\.\d+\.\d+.*", loggair.__version__) or loggair.__version__ == "0.0.0.dev0"
     assert "__version__" in loggair.__all__
+
+
+def test_the_documented_public_functions_are_exported_by_the_package() -> None:
+    """The guides tell users to gate expensive logging on `effective_level_no` and
+    to dry-run the resolver with `resolve_settings`; both must be importable from
+    `loggair` itself, not only from the `core` module they are defined in."""
+    import loggair
+    import loggair.core
+
+    assert loggair.effective_level_no is loggair.core.effective_level_no
+    assert loggair.resolve_settings is loggair.core.resolve_settings
+    assert "effective_level_no" in loggair.__all__
+    assert "resolve_settings" in loggair.__all__
+    assert loggair.Settings is loggair.settings.Settings
+    assert loggair.Overrides is loggair.settings.Overrides
+    # Every advertised name resolves — a typo in __all__ would break `from loggair import *`.
+    for name in loggair.__all__:
+        assert hasattr(loggair, name), name
 
 
 def test_configure_default(tmp_path: Path) -> None:
@@ -135,6 +153,33 @@ def test_configure_rank_non_zero(tmp_path: Path) -> None:
         assert "[rank 1]" in content
     finally:
         del os.environ["RANK"]
+
+
+def test_a_non_zero_mpi_rank_gets_no_console_sink(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    """Under plain `mpirun` only OMPI_COMM_WORLD_RANK (or PMI_RANK, ...) names the
+    rank. Before it was read, every MPI process was rank None and every one of
+    them got a console sink — the log storm Loggair exists to prevent."""
+    monkeypatch.setenv("OMPI_COMM_WORLD_RANK", "1")
+    configure_logging(log_dir=tmp_path, script_name="mpi_app")
+    get_logger("mpi").info("Rank 1 message")
+    shutdown_logging()
+
+    assert capsys.readouterr().err == ""
+    content = (tmp_path / "mpi_app.log").read_text()
+    assert "Rank 1 message" in content
+    assert "[rank 1]" in content
+
+
+def test_mpi_rank_zero_keeps_the_console_sink(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    monkeypatch.setenv("OMPI_COMM_WORLD_RANK", "0")
+    configure_logging(log_dir=tmp_path, script_name="mpi_app")
+    get_logger("mpi").info("Rank 0 message")
+    shutdown_logging()
+
+    assert "Rank 0 message" in capsys.readouterr().err
+    content = (tmp_path / "mpi_app.log").read_text()
+    assert "Rank 0 message" in content
+    assert "[rank" not in content
 
 
 def test_configure_rank_mocked(tmp_path: Path, monkeypatch: Any) -> None:
@@ -329,6 +374,8 @@ def test_module_levels_workers_only_applies_in_child(tmp_path: Path, monkeypatch
             name = "Worker-1"
 
         monkeypatch.setattr(loggair.core, "current_process", lambda: _FakeProc())
+
+        monkeypatch.setattr(loggair.settings, "current_process", lambda: _FakeProc())
 
         configure_logging(log_dir=tmp_path / "logs", script_name="wo_child")
         _emit("pkg.workeronly", "INFO", "child-info")
@@ -1142,6 +1189,8 @@ def test_runtime_rotation_only_in_main_process(tmp_path: Path, monkeypatch: Any)
         name = "Worker-1"
 
     monkeypatch.setattr(loggair.core, "current_process", lambda: _FakeProc())
+
+    monkeypatch.setattr(loggair.settings, "current_process", lambda: _FakeProc())
 
     configure_logging(log_dir=tmp_path / "logs", script_name="rtchild", rotation="400 B")
     params = loggair.core.LoggingState.file_sink_params
