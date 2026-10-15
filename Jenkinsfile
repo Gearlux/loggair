@@ -201,6 +201,7 @@ with open('isort-checkstyle.xml', 'w') as f:
 
         stage('Unit Tests') {
             steps {
+                sh 'rm -f test-report.xml coverage.xml'
                 script {
                     if (fileExists('tests') && sh(script: "find tests -name '*.py' | grep -q .", returnStatus: true) == 0) {
                         sh "${VENV_BIN}/pytest tests --junitxml=test-report.xml --cov=loggair --cov-report=xml:coverage.xml --cov-report=term"
