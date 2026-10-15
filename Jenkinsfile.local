@@ -4,6 +4,24 @@
 // Source template: aisland/services/jenkins.py (JenkinsService.scaffold_pipelines)
 // To regenerate:  aisland jenkins scaffold loggair --force
 // =========================================================================
+
+// A long stage's time limit, in minutes: past it the stage fails naming itself and the limit, so one hung test
+// never holds the nightly orchestrator (2026-10-15: annotaide.local #37 waited 109 min on a test ignoring SIGINT).
+// An abort by hand before the limit stays an abort. The limits: STAGE_LIMITS in aisland/services/jenkins.py.
+def limited(String stage, int minutes, Closure body) {
+    long started = System.currentTimeMillis()
+    try {
+        timeout(time: minutes, unit: 'MINUTES') {
+            body()
+        }
+    } catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException interrupted) {
+        if (System.currentTimeMillis() - started < minutes * 60000L) {
+            throw interrupted
+        }
+        error("${stage} timed out after ${minutes} min - its limit in Jenkinsfile.local (STAGE_LIMITS in aisland/services/jenkins.py)")
+    }
+}
+
 pipeline {
     agent {
         node {
@@ -212,11 +230,14 @@ with open('isort-checkstyle.xml', 'w') as f:
 
         stage('Unit Tests') {
             steps {
-                script {
-                    if (fileExists('tests') && sh(script: "find tests -name '*.py' | grep -q .", returnStatus: true) == 0) {
-                        sh "${VENV_BIN}/pytest tests --junitxml=test-report.xml --cov=loggair --cov-report=xml:coverage.xml --cov-report=term"
-                    } else {
-                        echo "No tests found in 'tests' directory. Skipping."
+                limited('Unit Tests', 15) {
+                    sh 'rm -f test-report.xml coverage.xml'
+                    script {
+                        if (fileExists('tests') && sh(script: "find tests -name '*.py' | grep -q .", returnStatus: true) == 0) {
+                            sh "${VENV_BIN}/pytest tests --junitxml=test-report.xml --cov=loggair --cov-report=xml:coverage.xml --cov-report=term"
+                        } else {
+                            echo "No tests found in 'tests' directory. Skipping."
+                        }
                     }
                 }
             }
@@ -240,24 +261,26 @@ with open('isort-checkstyle.xml', 'w') as f:
 
         stage('Verify Examples') {
             steps {
-                echo 'Running project examples...'
-                sh '''
-                    for f in examples/*.py; do
-                        if [ -f "$f" ]; then
-                            echo "Verifying $f..."
-                            ${VENV_BIN}/python3 "$f"
-                        fi
-                    done
-                    # Directory examples opt in by shipping a run.py entry point;
-                    # network-dependent / install-only example apps ship no run.py
-                    # and are skipped by construction.
-                    for f in examples/*/run.py; do
-                        if [ -f "$f" ]; then
-                            echo "Verifying $f..."
-                            ${VENV_BIN}/python3 "$f"
-                        fi
-                    done
-                '''
+                limited('Verify Examples', 15) {
+                    echo 'Running project examples...'
+                    sh '''
+                        for f in examples/*.py; do
+                            if [ -f "$f" ]; then
+                                echo "Verifying $f..."
+                                ${VENV_BIN}/python3 "$f"
+                            fi
+                        done
+                        # Directory examples opt in by shipping a run.py entry point;
+                        # network-dependent / install-only example apps ship no run.py
+                        # and are skipped by construction.
+                        for f in examples/*/run.py; do
+                            if [ -f "$f" ]; then
+                                echo "Verifying $f..."
+                                ${VENV_BIN}/python3 "$f"
+                            fi
+                        done
+                    '''
+                }
             }
         }
 
@@ -266,22 +289,24 @@ with open('isort-checkstyle.xml', 'w') as f:
                 expression { return fileExists('notebooks') }
             }
             steps {
-                echo 'Executing project notebooks...'
-                sh '''
-                    # POSIX-clean: dash (typical /bin/sh on Linux) has no shopt/arrays.
-                    # Loop runs zero times when no .ipynb matches (we check found at the end).
-                    found=0
-                    for nb in notebooks/*.ipynb; do
-                        [ -f "$nb" ] || continue
-                        found=1
-                        echo "Executing $nb..."
-                        ${VENV_BIN}/jupyter nbconvert --to notebook --execute \
-                            --output "/tmp/$(basename "$nb" .ipynb)-ci.ipynb" \
-                            "$nb"
-                    done
-                    [ "$found" -eq 0 ] && echo "No notebooks to verify."
-                    exit 0
-                '''
+                limited('Verify Notebooks', 15) {
+                    echo 'Executing project notebooks...'
+                    sh '''
+                        # POSIX-clean: dash (typical /bin/sh on Linux) has no shopt/arrays.
+                        # Loop runs zero times when no .ipynb matches (we check found at the end).
+                        found=0
+                        for nb in notebooks/*.ipynb; do
+                            [ -f "$nb" ] || continue
+                            found=1
+                            echo "Executing $nb..."
+                            ${VENV_BIN}/jupyter nbconvert --to notebook --execute \
+                                --output "/tmp/$(basename "$nb" .ipynb)-ci.ipynb" \
+                                "$nb"
+                        done
+                        [ "$found" -eq 0 ] && echo "No notebooks to verify."
+                        exit 0
+                    '''
+                }
             }
         }
     }
