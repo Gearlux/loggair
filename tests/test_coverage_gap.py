@@ -202,7 +202,8 @@ def test_pivot_complete_exception(tmp_path: Path, monkeypatch: Any) -> None:
 
 
 def test_get_logger_no_name() -> None:
-    """Line 202: return logger if not name"""
-    from loggair.core import get_logger
+    """Once configured, a nameless get_logger() is loguru's logger itself."""
+    from loggair.core import configure_logging, get_logger
 
+    configure_logging()
     assert get_logger() is logger

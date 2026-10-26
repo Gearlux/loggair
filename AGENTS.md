@@ -48,6 +48,11 @@ this workspace `~/.config/loggair/config.yaml` sets `log_dir: ~/logs`: debug a l
   the lazy `configure_logging()`, so a disabled run creates no file, sink or queue. `NullLogger`
   answers any unforeseen call with a no-op but re-raises `AttributeError` for dunders, so it
   stays picklable. (`tests/test_disable_and_compression.py`)
+- Loggair starts on the FIRST USE of a logger, never on `get_logger()` alone (user choice 2026-10-26): before
+  configuration `get_logger()` returns `core._DeferredLogger`, which configures on its first non-dunder attribute
+  and then passes attributes through (the caller calls them, so the frame is the caller's), pickling as
+  `get_logger(name)`; once configured, the logger itself. Never configure in `get_logger()` again, never wrap the
+  logger's methods. Record: "Loggair starts on the first message". (`tests/test_deferred_start.py`)
 
 ## Configuration
 

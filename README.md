@@ -50,8 +50,9 @@ The console (stderr) shows `INFO` and above:
 
 What happened without any configuration:
 
-- The first `get_logger()` configured Loggair. The log file is named after the
-  running script and lives in `./logs`.
+- The first message configured Loggair — `get_logger()` alone starts nothing, so a
+  library that only asks for its logger prints and writes nothing. The log file is
+  named after the running script and lives in `./logs`.
 - A `train.log` left by an earlier run was archived as `train.<timestamp>.log`
   first; the last 5 archives are kept.
 - Standard-library `logging` and `warnings` were redirected into the same two

@@ -5,6 +5,21 @@ All notable changes to Loggair are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Loggair starts on the first message, never on `get_logger()` alone.** A library
+  calling `get_logger(__name__)` at module scope no longer configures Loggair on
+  import: a program that imports it and logs nothing prints no
+  `Loggair initialized` line, opens no log file, prunes no archive, installs no
+  signal handler and leaves the stdlib's `logging` and `warnings` alone. Before
+  configuration `get_logger()` hands out a stand-in that configures on its first
+  use and then is the logger (the caller's module, function and line, the name
+  given, picklable for spawn workers); once configured it returns the logger
+  itself. A `configure_logging(...)` made after the imports and before the first
+  message is now the one applied. Python `logging` and `warnings` are taken over
+  from the first message on.
+
 ## [0.2.1] - 2026-10-13
 
 ### Added

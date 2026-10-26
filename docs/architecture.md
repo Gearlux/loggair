@@ -873,3 +873,42 @@ The coercions, the field order (the public order follows it — change the golde
 list in `tests/test_settings.py` deliberately), and which fields are derived. Do
 not give `Settings` defaults, do not spell a setting outside the dataclass and
 `Overrides`, and do not let `to_dict()` emit a `secret` field.
+
+## Loggair starts on the first message, never on `get_logger()` alone (2026-10-26)
+
+### Context
+
+`get_logger()` configured Loggair. Libraries call it at module scope, so importing one started Loggair in any
+program: a service manager listing the services its projects bring printed `Loggair initialized: <script>.log` on
+every command, created that log file, installed signal handlers and took over the stdlib's logging — in a program
+that never logged through Loggair. It also made a program's own `configure_logging(log_dir=...)` after its imports a
+no-op.
+
+### Decision
+
+Before configuration `get_logger()` returns a stand-in, `core._DeferredLogger`, whose first attribute access (a
+message, `bind`, `opt`, …) configures Loggair and which then passes every attribute to the logger it stands for. The
+attribute is handed back to the caller, which calls it itself, so loguru's frame is the caller's. A dunder probe
+starts nothing; the stand-in pickles as the `get_logger` call that made it. Once configured, `get_logger()` returns
+the logger itself, as before.
+
+### Consequences
+
+- Importing a library prints and writes nothing until something logs.
+- The stdlib's `logging` and `warnings` are intercepted from the first message, not from the first import.
+- A `configure_logging(...)` between the imports and the first message is applied.
+
+### Example
+
+```python
+from loggair import get_logger
+
+logger = get_logger(__name__)   # nothing configured, nothing printed
+logger.info("hello")            # "Loggair initialized: app.log", then "hello"
+```
+
+### What you may change
+
+What counts as the first use (today: any non-dunder attribute). Never: configure on `get_logger()` again, or wrap the
+logger's methods (the caller's frame would be lost).
+
