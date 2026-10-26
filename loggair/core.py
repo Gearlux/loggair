@@ -719,8 +719,52 @@ def _set_record_name(name: str, record: Any) -> None:
     record["name"] = name
 
 
+def _named_logger(name: Optional[str]) -> "Logger":
+    """The configured logger, its records named ``name`` when one is given."""
+    if not name:
+        return logger
+    return logger.patch(partial(_set_record_name, name))
+
+
+class _DeferredLogger:
+    """What :func:`get_logger` hands out before Loggair is configured: it configures Loggair the first time it is
+    USED and from then on passes every attribute to the logger it stands for.
+
+    A library calls ``get_logger(__name__)`` at module scope; a program that only imports it, and logs nothing, must
+    not print ``Loggair initialized``, open a log file or take over the stdlib's logging. The attribute is handed
+    back to the caller, which calls it itself, so loguru sees the caller's frame: module, function and line are the
+    caller's. It pickles as the ``get_logger`` call that made it, so a spawn worker gets a working logger. An attribute
+    set on it (a test's ``monkeypatch.setattr(module.logger, "warning", ...)``) is its own and wins, as it would on a
+    logger.
+    """
+
+    def __init__(self, name: Optional[str]) -> None:
+        self._name = name
+        self._logger: Optional["Logger"] = None
+
+    def _started(self) -> "Logger":
+        if not LoggingState.configured:
+            configure_logging()
+        if self._logger is None:
+            self._logger = _named_logger(self._name)
+        return self._logger
+
+    def __getattr__(self, attribute: str) -> Any:
+        if attribute.startswith("__"):  # copy/pickle probes must not start Loggair
+            raise AttributeError(attribute)
+        return getattr(self._started(), attribute)
+
+    def __reduce__(self) -> Any:
+        return (get_logger, (self._name,))
+
+
 def get_logger(name: Optional[str] = None) -> "Logger":
-    """Return the Loggair logger, lazily configuring on first use.
+    """Return the Loggair logger; Loggair configures itself on the logger's first USE, never on this call alone.
+
+    Before configuration the logger handed out is a stand-in (:class:`_DeferredLogger`) that configures on its first
+    message, so importing a library that asks for its logger prints and writes nothing, and a
+    ``configure_logging(...)`` made after the imports and before the first message is the one applied. Once
+    configured, the logger itself.
 
     When `name` is given it OVERRIDES loguru's auto-detected ``record["name"]``
     (the emitting module) on every record from the returned logger — so it shows
@@ -731,7 +775,5 @@ def get_logger(name: Optional[str] = None) -> "Logger":
     if _logging_disabled():
         return cast("Logger", NullLogger(name))
     if not LoggingState.configured:
-        configure_logging()
-    if not name:
-        return logger
-    return logger.patch(partial(_set_record_name, name))
+        return cast("Logger", _DeferredLogger(name))
+    return _named_logger(name)

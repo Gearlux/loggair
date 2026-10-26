@@ -23,9 +23,13 @@ environment variable that is set but empty counts as unset. Config files merge
 **shallowly** — a `module_levels:` block in a local `loggair.yaml` fully *replaces*
 one from the user config; rules are not merged per prefix.
 
-Configuration happens once per process. The first `get_logger()` anywhere —
+Configuration happens once per process. The first MESSAGE logged anywhere —
 including inside an imported library — configures Loggair from the environment
-and the config files, and a later plain `configure_logging(...)` is a no-op. To
+and the config files, and a later plain `configure_logging(...)` is a no-op.
+`get_logger()` alone configures nothing: a library calling it at import time
+prints and writes nothing until it logs, so a program's own
+`configure_logging(...)` after its imports and before its first message is the
+one applied. To
 change a live configuration, use
 [`reconfigure()`](#changing-settings-in-a-running-process).
 
@@ -192,7 +196,7 @@ export NO_COLOR=1
 ```
 
 To change coloring **after** logging is already configured — including the lazy
-auto-configuration the first `get_logger()` triggers — use `reconfigure()`
+auto-configuration the first message triggers — use `reconfigure()`
 (a thin `configure_logging(force=True, ...)` wrapper that reloads the sinks).
 Setting the env var alone is too late once the console sink exists: its
 `colorize` was baked at first configure, so only a reload re-resolves it.
