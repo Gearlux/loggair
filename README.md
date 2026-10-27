@@ -93,6 +93,10 @@ Every setting, its environment variable and its default are in the
 [configuration reference][configuration]; [`loggair.example.yaml`][example-yaml]
 is the annotated template.
 
+Switches that exist only as environment variables: `LOGGAIR_EAGER_ENQUEUE`, `LOGGAIR_DISABLE_LOGGING`,
+`LOGGAIR_DISABLE_MULTIPROCESS_LOGGING` and `NO_COLOR` (see [configuration](docs/configuration.md)). The file
+`env.complete` lists every variable, ready to copy into a `.env`.
+
 ## Common tasks
 
 | I want to… | Setting or call | Read more |
