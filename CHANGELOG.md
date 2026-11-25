@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **The licence is now the PolyForm Noncommercial License 1.0.0** (`LICENSE`, `pyproject.toml`): free for personal, academic and other noncommercial use; commercial use needs a separate licence from the author. It was MIT; the versions released under MIT keep that licence.
 - **Loggair starts on the first message, never on `get_logger()` alone.** A library
   calling `get_logger(__name__)` at module scope no longer configures Loggair on
   import: a program that imports it and logs nothing prints no

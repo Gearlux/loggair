@@ -188,7 +188,7 @@ is safe beside a live run. `--json` emits the report for scripts; inside
 
 ## License
 
-MIT
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) (the `LICENSE` file): free for personal, academic and other noncommercial use. Commercial use needs a separate licence from the author.
 
 [configuration]: https://github.com/Gearlux/loggair/blob/main/docs/configuration.md
 [module-levels]: https://github.com/Gearlux/loggair/blob/main/docs/configuration.md#per-logger-per-sink-level-overrides

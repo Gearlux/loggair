@@ -13,7 +13,7 @@ authors = [{name = "Gert Behiels"}]
 # PEP 639 SPDX expression; the license CLASSIFIER is deliberately absent
 # (deprecated in favour of this field — re-adding it reintroduces the
 # SetuptoolsDeprecationWarning at build time).
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
