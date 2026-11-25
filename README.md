@@ -50,8 +50,9 @@ The console (stderr) shows `INFO` and above:
 
 What happened without any configuration:
 
-- The first `get_logger()` configured Loggair. The log file is named after the
-  running script and lives in `./logs`.
+- The first message configured Loggair — `get_logger()` alone starts nothing, so a
+  library that only asks for its logger prints and writes nothing. The log file is
+  named after the running script and lives in `./logs`.
 - A `train.log` left by an earlier run was archived as `train.<timestamp>.log`
   first; the last 5 archives are kept.
 - Standard-library `logging` and `warnings` were redirected into the same two
@@ -91,6 +92,10 @@ export LOGGAIR_DIR=/var/log/myapp LOGGAIR_CONSOLE_LEVEL=ERROR
 Every setting, its environment variable and its default are in the
 [configuration reference][configuration]; [`loggair.example.yaml`][example-yaml]
 is the annotated template.
+
+Switches that exist only as environment variables: `LOGGAIR_EAGER_ENQUEUE`, `LOGGAIR_DISABLE_LOGGING`,
+`LOGGAIR_DISABLE_MULTIPROCESS_LOGGING` and `NO_COLOR` (see [configuration](docs/configuration.md)). The file
+`env.complete` lists every variable, ready to copy into a `.env`.
 
 ## Common tasks
 
@@ -183,7 +188,7 @@ is safe beside a live run. `--json` emits the report for scripts; inside
 
 ## License
 
-MIT
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) (the `LICENSE` file): free for personal, academic and other noncommercial use. Commercial use needs a separate licence from the author.
 
 [configuration]: https://github.com/Gearlux/loggair/blob/main/docs/configuration.md
 [module-levels]: https://github.com/Gearlux/loggair/blob/main/docs/configuration.md#per-logger-per-sink-level-overrides
