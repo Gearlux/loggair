@@ -8,7 +8,7 @@ title) and the code docstrings; usage is in the [README](README.md) (the quickst
 ## Current state
 
 Loguru-backed logging engine for HPC and ML runs: rank-aware sinks, a config hierarchy,
-stdlib/framework interception, call tracing. Feature-complete. `0.2.0` on PyPI, released by tag
+stdlib/framework interception, call tracing. Feature-complete. `0.3.0` on PyPI, released by tag
 from the public repo `Gearlux/loggair`. Python >= 3.12. Hard dependencies are `loguru` and
 `pyyaml` only; `apprise` is the optional `[alerts]` extra; Confluid is never a dependency.
 
@@ -246,7 +246,7 @@ Pins (`::name`) are in `tests/test_track.py`.
 - Distribution and import package are both `loggair` (settled 2026-07-05; do not re-litigate).
 - `py.typed` ships through `[tool.setuptools.package-data]`; `MANIFEST.in` ships
   `loggair.example.yaml` and `CHANGELOG.md` in the sdist.
-- Metadata is PEP 639: `license = "MIT"` as a plain SPDX string (build floor `setuptools>=77`)
+- Metadata is PEP 639: `license = "PolyForm-Noncommercial-1.0.0"` as a plain SPDX string (build floor `setuptools>=77`)
   and no `License ::` classifier; either one brings back the build deprecation warnings.
 - Validate a packaging change with `python -m build` (expect zero deprecation warnings) and
   `twine check --strict dist/*`; both are in the `dev` extra.
