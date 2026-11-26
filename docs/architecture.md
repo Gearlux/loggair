@@ -912,3 +912,45 @@ logger.info("hello")            # "Loggair initialized: app.log", then "hello"
 What counts as the first use (today: any non-dunder attribute). Never: configure on `get_logger()` again, or wrap the
 logger's methods (the caller's frame would be lost).
 
+## Loggair removes only the sinks it added (2026-11-26)
+
+### Context
+
+loguru's `logger` is one object shared by everything in the process. Configuring Loggair called `logger.remove()`
+with no id, which deletes every sink, not only Loggair's: a test catching a warning with `logger.add(...)`, or a host
+showing the log in a panel, stopped receiving records without a word. While `get_logger()` configured Loggair, that
+happened at import, before most applications added a sink. Once Loggair started on the first message (the record
+above), every sink added between the imports and the first message was deleted, and so was every sink in place at a
+`reconfigure()`, a `force_no_color()`, the reload signal or a move to a new `log_dir`.
+
+### Decision
+
+Loggair keeps the id of every sink it adds (`LoggingState.console_sink_id`, `file_sink_id`, `alert_sink_id`), and a
+configure or a pivot removes those ids and loguru's own stderr sink through `core._remove_own_sinks`, never anything
+else. loguru's own sink is id 0, the first id loguru hands out, added when loguru is imported while `LOGURU_AUTOINIT`
+is on (the default); with it off there is no such sink, id 0 is the application's first own sink, and Loggair leaves
+it alone. `reset_logging()` keeps its bare `logger.remove()`: removing every sink is its documented job.
+
+### Consequences
+
+- A sink the application added receives every record from then on, through every configure.
+- A message prints once: loguru's own stderr sink is still replaced by Loggair's console sink.
+- An application that replaced loguru's stderr sink with its own before Loggair started now has both on the console;
+  before, Loggair deleted its sink.
+
+### Example
+
+```python
+from loguru import logger
+from loggair import get_logger
+
+log = get_logger("mylib")              # a library asks for its logger at import
+caught = []
+logger.add(caught.append, level="WARNING")
+log.warning("the first message")       # Loggair starts here; `caught` receives the message
+```
+
+### What you may change
+
+Which sinks Loggair adds: a new one records its id in `LoggingState` and `_remove_own_sinks` removes it. Never a bare
+`logger.remove()` outside `reset_logging()`, and never remove id 0 while `LOGURU_AUTOINIT` is off.

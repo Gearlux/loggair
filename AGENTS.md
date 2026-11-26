@@ -53,6 +53,11 @@ this workspace `~/.config/loggair/config.yaml` sets `log_dir: ~/logs`: debug a l
   and then passes attributes through (the caller calls them, so the frame is the caller's), pickling as
   `get_logger(name)`; once configured, the logger itself. Never configure in `get_logger()` again, never wrap the
   logger's methods. Record: "Loggair starts on the first message". (`tests/test_deferred_start.py`)
+- A configure or a pivot removes only Loggair's own sinks (`LoggingState.console_sink_id`, `file_sink_id`,
+  `alert_sink_id`) and loguru's own stderr sink (id 0, only while `LOGURU_AUTOINIT` is on), through
+  `core._remove_own_sinks`; a sink the application added survives. A new Loggair sink records its id there. The only
+  bare `logger.remove()` is `reset_logging()`'s. Record: "Loggair removes only the sinks it added".
+  (`tests/test_application_sinks.py`)
 
 ## Configuration
 

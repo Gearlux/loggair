@@ -326,6 +326,11 @@ An invalid `intercept` value raises `ValueError` at configure time.
 
 ## Embedding and teardown
 
+A sink your application adds with loguru's `logger.add(...)` is yours: configuring
+Loggair, `reconfigure()`, `force_no_color()`, the reload signal and a move to a new
+`log_dir` replace only Loggair's own sinks and loguru's own stderr sink, so your
+sink keeps receiving every record and a message still prints once.
+
 `shutdown_logging()` flushes pending records (sinks stay installed) — call it at
 normal process exit. Hosts that need to switch Loggair **off** cleanly (pytest
 plugins, notebooks, long-lived servers) use `reset_logging()`, which flushes and
