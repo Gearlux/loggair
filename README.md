@@ -156,7 +156,7 @@ options, the costs, and how configured objects render as their configuration.
 
 ```console
 $ python -m loggair
-loggair 0.2.0  (loguru 0.7.3, python 3.13.14)
+loggair 0.3.0  (loguru 0.7.3, python 3.13.14)
 process:  MainProcess (pid 29487)
 rank:     none detected (single-process, or rank 0 by default)
 

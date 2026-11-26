@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-26
+
 ### Changed
 - **The licence is now the PolyForm Noncommercial License 1.0.0** (`LICENSE`, `pyproject.toml`): free for personal, academic and other noncommercial use; commercial use needs a separate licence from the author. It was MIT; the versions released under MIT keep that licence.
 - **Loggair starts on the first message, never on `get_logger()` alone.** A library
@@ -20,6 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   itself. A `configure_logging(...)` made after the imports and before the first
   message is now the one applied. Python `logging` and `warnings` are taken over
   from the first message on.
+
+### Fixed
+- **Loggair keeps the sinks your application added.** Configuring removed every
+  loguru sink in the process, not only Loggair's own: a sink added with
+  `logger.add(...)` before the first message, or before a `reconfigure()`,
+  `force_no_color()`, the reload signal or a move to a new `log_dir`, stopped
+  receiving records without a word. Loggair now removes only the sinks it added
+  and loguru's own stderr sink, so each message still prints once. With
+  `LOGURU_AUTOINIT` off, loguru adds no sink of its own and Loggair removes none.
+  `reset_logging()` still removes every sink.
 
 ## [0.2.1] - 2026-10-13
 

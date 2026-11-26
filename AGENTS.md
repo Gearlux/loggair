@@ -8,7 +8,7 @@ title) and the code docstrings; usage is in the [README](README.md) (the quickst
 ## Current state
 
 Loguru-backed logging engine for HPC and ML runs: rank-aware sinks, a config hierarchy,
-stdlib/framework interception, call tracing. Feature-complete. `0.2.0` on PyPI, released by tag
+stdlib/framework interception, call tracing. Feature-complete. `0.3.0` on PyPI, released by tag
 from the public repo `Gearlux/loggair`. Python >= 3.12. Hard dependencies are `loguru` and
 `pyyaml` only; `apprise` is the optional `[alerts]` extra; Confluid is never a dependency.
 
@@ -53,6 +53,11 @@ this workspace `~/.config/loggair/config.yaml` sets `log_dir: ~/logs`: debug a l
   and then passes attributes through (the caller calls them, so the frame is the caller's), pickling as
   `get_logger(name)`; once configured, the logger itself. Never configure in `get_logger()` again, never wrap the
   logger's methods. Record: "Loggair starts on the first message". (`tests/test_deferred_start.py`)
+- A configure or a pivot removes only Loggair's own sinks (`LoggingState.console_sink_id`, `file_sink_id`,
+  `alert_sink_id`) and loguru's own stderr sink (id 0, only while `LOGURU_AUTOINIT` is on), through
+  `core._remove_own_sinks`; a sink the application added survives. A new Loggair sink records its id there. The only
+  bare `logger.remove()` is `reset_logging()`'s. Record: "Loggair removes only the sinks it added".
+  (`tests/test_application_sinks.py`)
 
 ## Configuration
 
@@ -241,7 +246,7 @@ Pins (`::name`) are in `tests/test_track.py`.
 - Distribution and import package are both `loggair` (settled 2026-07-05; do not re-litigate).
 - `py.typed` ships through `[tool.setuptools.package-data]`; `MANIFEST.in` ships
   `loggair.example.yaml` and `CHANGELOG.md` in the sdist.
-- Metadata is PEP 639: `license = "MIT"` as a plain SPDX string (build floor `setuptools>=77`)
+- Metadata is PEP 639: `license = "PolyForm-Noncommercial-1.0.0"` as a plain SPDX string (build floor `setuptools>=77`)
   and no `License ::` classifier; either one brings back the build deprecation warnings.
 - Validate a packaging change with `python -m build` (expect zero deprecation warnings) and
   `twine check --strict dist/*`; both are in the `dev` extra.

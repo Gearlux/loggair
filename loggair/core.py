@@ -9,6 +9,7 @@ from multiprocessing import current_process
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping, Optional, Unpack, cast
 
+from loguru import _defaults as _loguru_defaults
 from loguru import logger
 
 if TYPE_CHECKING:
@@ -34,6 +35,11 @@ class LoggingState:
     # detected. Avoids paying the POSIX-semaphore cost in single-process runs.
     file_sink_id: Optional[int] = None
     file_sink_params: Optional[dict] = None
+    # The other sinks Loggair added. A (re)configure removes these three ids and no other sink
+    # (see _remove_own_sinks): loguru's logger is the whole process's, and an application's own
+    # `logger.add(...)` must outlive every configure.
+    console_sink_id: Optional[int] = None
+    alert_sink_id: Optional[int] = None
     enqueue_active: bool = False
     enqueue_requested: bool = False
     # The explicitly-passed (non-None) kwargs of the last successful
@@ -67,6 +73,8 @@ class LoggingState:
         cls.log_file = None
         cls.file_sink_id = None
         cls.file_sink_params = None
+        cls.console_sink_id = None
+        cls.alert_sink_id = None
         cls.enqueue_active = False
         cls.enqueue_requested = False
         cls.last_kwargs = {}
@@ -80,6 +88,33 @@ class LoggingState:
         logger.remove()
         if hasattr(discovery.get_rank, "cache_clear"):
             discovery.get_rank.cache_clear()
+
+
+# The stderr sink loguru adds for itself when it is imported (`LOGURU_AUTOINIT`, on by default) is always id 0, the
+# first id loguru hands out. With autoinit off there is no such sink, and id 0 is the application's first own sink.
+_LOGURU_DEFAULT_SINK_ID: Optional[int] = 0 if _loguru_defaults.LOGURU_AUTOINIT else None
+
+
+def _remove_own_sinks() -> None:
+    """Remove the sinks Loggair added, and loguru's own stderr sink; never a sink the application added.
+
+    loguru's logger is one object shared by everything in the process, so a bare ``logger.remove()`` here also
+    deleted the sink of a test catching a warning, or of a host showing the log in a panel, whenever Loggair
+    configured: on the first message, ``reconfigure()``, ``force_no_color()``, the reload signal and a move to a new
+    log folder. ``reset_logging()`` still removes every sink: that is its job.
+    """
+    for sink_id in (LoggingState.console_sink_id, LoggingState.file_sink_id, LoggingState.alert_sink_id):
+        if sink_id is not None:
+            try:
+                logger.remove(sink_id)
+            except ValueError:
+                pass  # already removed by an external caller
+    LoggingState.console_sink_id = LoggingState.file_sink_id = LoggingState.alert_sink_id = None
+    if _LOGURU_DEFAULT_SINK_ID is not None:
+        try:
+            logger.remove(_LOGURU_DEFAULT_SINK_ID)
+        except ValueError:
+            pass  # removed already: by an earlier configure, or by the application
 
 
 def _upgrade_to_enqueue() -> None:
@@ -255,7 +290,7 @@ def _perform_pivot(
     current_log: Path, new_log: Path, do_rotation: bool, retention: int, compression: Optional[str] = None
 ) -> None:
     """Transition from an interim log file to a final target file."""
-    logger.remove()
+    _remove_own_sinks()
     try:
         logger.complete()
     except Exception as e:
@@ -316,7 +351,9 @@ def configure_logging(*, force: bool = False, **overrides: Unpack[Overrides]) ->
 
     What it does, in order: creates ``log_dir``; rotates an existing log file
     (startup rotation — the shared file by the main process of rank 0, a per-worker
-    file by its owner) or pivots from an interim file to a new path; adds the
+    file by its owner) or pivots from an interim file to a new path; removes the
+    sinks it added before and loguru's own stderr sink, never a sink the
+    application added with ``logger.add``; adds the
     console sink (main process of rank 0 only) and the file sink (every process,
     lazily enqueued when ``enqueue`` is requested), plus the alert sink when
     ``alert_urls`` are set; installs stdlib/warnings interception per ``intercept``;
@@ -361,7 +398,7 @@ def _configure(overrides: Mapping[str, Any], *, force: bool) -> None:
 
     # 3. Setup Sinks
     if not LoggingState.configured or force:
-        logger.remove()
+        _remove_own_sinks()
 
         # Tear down any previous alert dispatcher (its loguru sink was just
         # removed); a new one is built below when alert_urls are configured.
@@ -370,7 +407,7 @@ def _configure(overrides: Mapping[str, Any], *, force: bool) -> None:
             LoggingState.alert_dispatcher = None
 
         if is_main_proc:
-            logger.add(
+            LoggingState.console_sink_id = logger.add(
                 sys.stderr,
                 # Not "TRACE": see _sink_floor — an open floor defeats loguru's
                 # only cheap early-out and costs ~3.4 us per discarded record.
@@ -435,7 +472,7 @@ def _configure(overrides: Mapping[str, Any], *, force: bool) -> None:
                 record = message.record
                 dispatcher.submit(str(message), record["level"].name, record["level"].no)
 
-            logger.add(
+            LoggingState.alert_sink_id = logger.add(
                 _alert_sink,
                 level=s.alert_level,
                 format=s.file_format,
